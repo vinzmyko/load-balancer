@@ -1,0 +1,28 @@
+# Binaries
+loadbalancer
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Go build artifacts
+*.test
+*.out
+
+# Go workspace
+/vendor/
+
+# Environment files
+.env
+.env.local
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Nix
+result
+result-*
