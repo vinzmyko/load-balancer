@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"sync/atomic"
 
 	"github.com/vinzmyko/load-balancer/internal/config"
 )
@@ -19,7 +20,8 @@ func healthHandler(w http.ResponseWriter, _ *http.Request) {
 // Forwards requests to backends
 func proxyHandler(proxies []*httputil.ReverseProxy) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		proxies[0].ServeHTTP(w, r)
+		backend := selectBackend(proxies)
+		proxies[backend].ServeHTTP(w, r)
 	}
 }
 
@@ -57,4 +59,11 @@ func createProxy(backendURL string) (*httputil.ReverseProxy, error) {
 	proxy := httputil.NewSingleHostReverseProxy(target)
 
 	return proxy, nil
+}
+
+var counter uint64
+
+func selectBackend(backends []*httputil.ReverseProxy) int {
+	next := atomic.AddUint64(&counter, 1)
+	return int(next % uint64(len(backends)))
 }
