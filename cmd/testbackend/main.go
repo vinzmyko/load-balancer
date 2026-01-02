@@ -5,7 +5,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sync/atomic"
 )
+
+var requestCounter uint64
 
 func main() {
 	port := "8081"
@@ -14,7 +17,9 @@ func main() {
 	}
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		response := fmt.Sprintf("Backend on port %s - Path: %s\n", port, r.URL.Path)
+		count := atomic.AddUint64(&requestCounter, 1)
+		// Reply to the requesting client
+		response := fmt.Sprintf("Backend port %s - Request #%d Path: %s\n", port, count, r.URL.Path)
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(response))
 	})
