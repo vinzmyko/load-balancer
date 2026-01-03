@@ -6,15 +6,61 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/vinzmyko/load-balancer/internal/config"
+)
+
+var (
+	counter      uint64
+	healthStatus map[int]bool
+	healthMutex  sync.RWMutex
 )
 
 // Health checking function handler
 func healthHandler(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("OK"))
+}
+
+// Performs a single health check for a backend
+func checkHealth(backendURL string) bool {
+	client := &http.Client{Timeout: 2 * time.Second}
+
+	resp, err := client.Get(backendURL + "/health")
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+
+	return resp.StatusCode == 200
+}
+
+// Starts a background health checker for a backend
+func startHealthChecker(idx int, backendURL string) {
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			<-ticker.C
+
+			isHealthy := checkHealth(backendURL)
+
+			healthMutex.Lock()
+			if healthStatus[idx] != isHealthy {
+				if isHealthy {
+					log.Printf("Backend %d (%s) is now HEALTHY", idx, backendURL)
+				} else {
+					log.Printf("Backend %d (%s) is now UNHEALTHY", idx, backendURL)
+				}
+				healthStatus[idx] = isHealthy
+			}
+			healthMutex.Unlock()
+		}
+	}()
 }
 
 // Forwards requests to backends
@@ -40,6 +86,11 @@ func main() {
 		proxies = append(proxies, proxy)
 	}
 
+	healthStatus = make(map[int]bool)
+	for i, backend := range cfg.Backends {
+		startHealthChecker(i, backend.URL)
+	}
+
 	http.HandleFunc("/health", healthHandler)
 	http.HandleFunc("/", proxyHandler(proxies))
 
@@ -61,9 +112,21 @@ func createProxy(backendURL string) (*httputil.ReverseProxy, error) {
 	return proxy, nil
 }
 
-var counter uint64
-
 func selectBackend(backends []*httputil.ReverseProxy) int {
 	next := atomic.AddUint64(&counter, 1)
+	backendCount := len(backends)
+
+	for i := range backendCount {
+		idx := int((next + uint64(i)) % uint64(backendCount))
+
+		healthMutex.RLock()
+		isHealthy := healthStatus[idx]
+		healthMutex.RUnlock()
+
+		if isHealthy {
+			return idx
+		}
+	}
+
 	return int(next % uint64(len(backends)))
 }
