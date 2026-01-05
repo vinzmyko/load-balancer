@@ -28,6 +28,90 @@ var (
 	backendHealthy  *prometheus.GaugeVec
 )
 
+type CircuitState int
+
+const (
+	StateClosed CircuitState = iota
+	StateOpen
+	StateHalfOpen
+)
+
+type CircuitBreaker struct {
+	backendURL       string
+	state            CircuitState
+	failures         int
+	lastFailureTime  time.Time
+	failureThreshold int
+	timeout          time.Duration
+	mu               sync.Mutex
+}
+
+func NewCircuitBreaker(backendURL string, failureThreshold int, timeout time.Duration) *CircuitBreaker {
+	return &CircuitBreaker{
+		backendURL:       backendURL,
+		state:            StateClosed,
+		failures:         0,
+		failureThreshold: failureThreshold,
+		timeout:          timeout,
+	}
+}
+
+// Check if request should be allowed
+func (cb *CircuitBreaker) canAttempt() bool {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	switch cb.state {
+	case StateClosed:
+		return true
+
+	case StateOpen:
+		// Check if timeout has passed
+		if time.Since(cb.lastFailureTime) > cb.timeout {
+			cb.state = StateHalfOpen
+			log.Printf("Circuit HALF-OPEN for backend %s - testing recovery", cb.backendURL)
+			return true
+		}
+		return false
+
+	case StateHalfOpen:
+		return true
+
+	default:
+		return true
+	}
+}
+
+// Records a successful request
+func (cb *CircuitBreaker) recordSuccess() {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	if cb.state == StateHalfOpen {
+		log.Printf("Circuit CLOSED for backend %s - backend recovered", cb.backendURL)
+	}
+
+	cb.failures = 0
+	cb.state = StateClosed
+}
+
+func (cb *CircuitBreaker) recordFailure() {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	cb.failures++
+	cb.lastFailureTime = time.Now()
+
+	if cb.state == StateHalfOpen {
+		// Failed so open the state (Unhealthy)
+		cb.state = StateOpen
+		log.Printf("Circuit OPENED for backend %s", cb.backendURL)
+	} else if cb.failures >= cb.failureThreshold {
+		cb.state = StateOpen
+		log.Printf("Circuit OPENED for backend %s", cb.backendURL)
+	}
+}
+
 // Health checking function handler
 func healthHandler(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
@@ -75,11 +159,11 @@ func startHealthChecker(idx int, backendURL string) {
 }
 
 // Forwards requests to backends
-func proxyHandler(proxies []*httputil.ReverseProxy, backends []config.BackendConfig) http.HandlerFunc {
+func proxyHandler(proxies []*httputil.ReverseProxy, backends []config.BackendConfig, circuitBreakers []*CircuitBreaker) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 
-		backend := selectBackend(proxies)
+		backend := selectBackend(proxies, circuitBreakers)
 		backendURL := backends[backend].URL
 
 		// Increment backend request counter
@@ -129,8 +213,12 @@ func main() {
 	prometheus.MustRegister(backendHealthy)
 
 	var proxies []*httputil.ReverseProxy
-	for _, backend := range cfg.Backends {
-		proxy, err := createProxy(backend.URL)
+	circuitBreakers := make([]*CircuitBreaker, len(cfg.Backends))
+
+	for i, backend := range cfg.Backends {
+		circuitBreakers[i] = NewCircuitBreaker(backend.URL, 3, 30*time.Second)
+
+		proxy, err := createProxy(backend.URL, circuitBreakers[i])
 		if err != nil {
 			log.Fatalf("Failed to create proxy for %s: %v", backend.URL, err)
 		}
@@ -154,7 +242,7 @@ func main() {
 	}()
 
 	http.HandleFunc("/health", healthHandler)
-	http.HandleFunc("/", proxyHandler(proxies, cfg.Backends))
+	http.HandleFunc("/", proxyHandler(proxies, cfg.Backends, circuitBreakers))
 
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
 	log.Printf("Starting load balancer on %s", addr)
@@ -164,17 +252,30 @@ func main() {
 	}
 }
 
-func createProxy(backendURL string) (*httputil.ReverseProxy, error) {
+func createProxy(backendURL string, circuitBreaker *CircuitBreaker) (*httputil.ReverseProxy, error) {
 	target, err := url.Parse(backendURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse backend server url %s: %w", backendURL, err)
 	}
 	proxy := httputil.NewSingleHostReverseProxy(target)
 
+	// Called on success
+	proxy.ModifyResponse = func(resp *http.Response) error {
+		circuitBreaker.recordSuccess()
+		return nil
+	}
+
+	// Called on errors
+	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		log.Printf("Proxy error for %s: %v", backendURL, err)
+		circuitBreaker.recordFailure()
+		http.Error(w, "Bad Gateway", http.StatusBadGateway)
+	}
+
 	return proxy, nil
 }
 
-func selectBackend(backends []*httputil.ReverseProxy) int {
+func selectBackend(backends []*httputil.ReverseProxy, circuitBreakers []*CircuitBreaker) int {
 	next := atomic.AddUint64(&counter, 1)
 	backendCount := len(backends)
 
@@ -185,10 +286,17 @@ func selectBackend(backends []*httputil.ReverseProxy) int {
 		isHealthy := healthStatus[idx]
 		healthMutex.RUnlock()
 
-		if isHealthy {
-			return idx
+		if !isHealthy {
+			continue
 		}
+
+		if !circuitBreakers[idx].canAttempt() {
+			continue
+		}
+
+		return idx
 	}
 
+	// All backends unhealthy or circuits open just return the first one
 	return int(next % uint64(len(backends)))
 }
