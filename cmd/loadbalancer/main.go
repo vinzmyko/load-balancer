@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -15,13 +14,11 @@ import (
 
 	"github.com/vinzmyko/load-balancer/internal/circuitbreaker"
 	"github.com/vinzmyko/load-balancer/internal/config"
+	"github.com/vinzmyko/load-balancer/internal/health"
 )
 
 var (
-	// Backend
-	counter      uint64       // Which backend server to send to
-	healthStatus map[int]bool // All the backend server's health status
-	healthMutex  sync.RWMutex // Mutex for health related operations
+	counter uint64
 
 	// Prometheus metrics
 	requestsTotal   *prometheus.CounterVec
@@ -35,52 +32,12 @@ func healthHandler(w http.ResponseWriter, _ *http.Request) {
 	w.Write([]byte("OK"))
 }
 
-// Performs a single health check for a backend
-func checkHealth(backendURL string) bool {
-	client := &http.Client{Timeout: 2 * time.Second}
-
-	resp, err := client.Get(backendURL + "/health")
-	if err != nil {
-		return false
-	}
-	defer resp.Body.Close()
-
-	return resp.StatusCode == 200
-}
-
-// Starts a background health checker for a backend
-func startHealthChecker(idx int, backendURL string) {
-	go func() {
-		ticker := time.NewTicker(10 * time.Second)
-		defer ticker.Stop()
-
-		for {
-			<-ticker.C
-
-			isHealthy := checkHealth(backendURL)
-
-			healthMutex.Lock()
-			if healthStatus[idx] != isHealthy {
-				if isHealthy {
-					log.Printf("Backend %d (%s) is now HEALTHY", idx, backendURL)
-					backendHealthy.WithLabelValues(backendURL).Set(1)
-				} else {
-					log.Printf("Backend %d (%s) is now UNHEALTHY", idx, backendURL)
-					backendHealthy.WithLabelValues(backendURL).Set(0)
-				}
-				healthStatus[idx] = isHealthy
-			}
-			healthMutex.Unlock()
-		}
-	}()
-}
-
 // Forwards requests to backends
-func proxyHandler(proxies []*httputil.ReverseProxy, backends []config.BackendConfig, circuitBreakers []*circuitbreaker.CircuitBreaker) http.HandlerFunc {
+func proxyHandler(proxies []*httputil.ReverseProxy, backends []config.BackendConfig, circuitBreakers []*circuitbreaker.CircuitBreaker, healthChecker *health.Checker) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 
-		backend := selectBackend(proxies, circuitBreakers)
+		backend := selectBackend(proxies, circuitBreakers, healthChecker)
 		backendURL := backends[backend].URL
 
 		// Increment backend request counter
@@ -142,9 +99,10 @@ func main() {
 		proxies = append(proxies, proxy)
 	}
 
-	healthStatus = make(map[int]bool)
+	healthChecker := health.NewChecker(len(cfg.Backends))
+
 	for i, backend := range cfg.Backends {
-		startHealthChecker(i, backend.URL)
+		healthChecker.StartChecking(i, backend.URL, backendHealthy)
 	}
 
 	metricsMux := http.NewServeMux()
@@ -159,7 +117,7 @@ func main() {
 	}()
 
 	http.HandleFunc("/health", healthHandler)
-	http.HandleFunc("/", proxyHandler(proxies, cfg.Backends, circuitBreakers))
+	http.HandleFunc("/", proxyHandler(proxies, cfg.Backends, circuitBreakers, healthChecker))
 
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
 	log.Printf("Starting load balancer on %s", addr)
@@ -192,18 +150,14 @@ func createProxy(backendURL string, circuitBreaker *circuitbreaker.CircuitBreake
 	return proxy, nil
 }
 
-func selectBackend(backends []*httputil.ReverseProxy, circuitBreakers []*circuitbreaker.CircuitBreaker) int {
+func selectBackend(backends []*httputil.ReverseProxy, circuitBreakers []*circuitbreaker.CircuitBreaker, healthChecker *health.Checker) int {
 	next := atomic.AddUint64(&counter, 1)
 	backendCount := len(backends)
 
 	for i := range backendCount {
 		idx := int((next + uint64(i)) % uint64(backendCount))
 
-		healthMutex.RLock()
-		isHealthy := healthStatus[idx]
-		healthMutex.RUnlock()
-
-		if !isHealthy {
+		if !healthChecker.IsHealthy(idx) {
 			continue
 		}
 
