@@ -77,6 +77,13 @@ func (hc *Checker) IsHealthy(idx int) bool {
 	return hc.healthStatus[idx]
 }
 
+// SetHealthy manually sets health status (for testing)
+func (hc *Checker) SetHealthy(idx int, healthy bool) {
+	hc.healthMutex.Lock()
+	defer hc.healthMutex.Unlock()
+	hc.healthStatus[idx] = healthy
+}
+
 // Performs a single health check for a backend
 func checkHealth(backendURL string) bool {
 	client := &http.Client{Timeout: 2 * time.Second}
