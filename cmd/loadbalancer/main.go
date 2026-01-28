@@ -197,7 +197,13 @@ func createProxy(backendURL string, circuitBreaker *circuitbreaker.CircuitBreake
 
 	// Called on success
 	proxy.ModifyResponse = func(resp *http.Response) error {
-		circuitBreaker.RecordSuccess()
+		// Only record success for 2xx and 3xx status codes
+		if resp.StatusCode >= 200 && resp.StatusCode < 400 {
+			circuitBreaker.RecordSuccess()
+		} else {
+			// 4xx and 5xx are failures
+			circuitBreaker.RecordFailure()
+		}
 		return nil
 	}
 
