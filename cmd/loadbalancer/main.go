@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -30,6 +31,23 @@ var (
 	backendHealthy  *prometheus.GaugeVec
 )
 
+type responseWriter struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func (rw *responseWriter) WriteHeader(code int) {
+	rw.statusCode = code
+	rw.ResponseWriter.WriteHeader(code)
+}
+
+func wrapResponseWriter(w http.ResponseWriter) *responseWriter {
+	return &responseWriter{
+		ResponseWriter: w,
+		statusCode:     200,
+	}
+}
+
 // Health checking function handler
 func healthHandler(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
@@ -41,6 +59,8 @@ func proxyHandler(proxies []*httputil.ReverseProxy, backends []config.BackendCon
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 
+		wrapped := wrapResponseWriter(w)
+
 		backend := selectBackend(proxies, circuitBreakers, healthChecker)
 		backendURL := backends[backend].URL
 
@@ -48,10 +68,21 @@ func proxyHandler(proxies []*httputil.ReverseProxy, backends []config.BackendCon
 		requestsTotal.WithLabelValues(backendURL).Inc()
 
 		// Forward request to backend
-		proxies[backend].ServeHTTP(w, r)
+		proxies[backend].ServeHTTP(wrapped, r)
+
+		circuitBreakers[backend].RecordSuccess()
 
 		duration := time.Since(start).Seconds()
 		requestDuration.WithLabelValues(backendURL).Observe(duration) // Add measurement to histogram
+
+		slog.Info("request",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"backend", backendURL,
+			"status", wrapped.statusCode,
+			"duration_ms", duration*1000,
+			"remote_addr", r.RemoteAddr,
+		)
 	}
 }
 
