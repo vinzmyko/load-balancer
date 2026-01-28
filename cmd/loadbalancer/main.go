@@ -1,12 +1,16 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
+	"os/signal"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -105,9 +109,17 @@ func main() {
 		healthChecker.StartChecking(i, backend.URL, backendHealthy)
 	}
 
+	http.HandleFunc("/health", healthHandler)
+	http.HandleFunc("/", proxyHandler(proxies, cfg.Backends, circuitBreakers, healthChecker))
+
+	server := &http.Server{
+		Addr: fmt.Sprintf(":%d", cfg.Server.Port),
+	}
+
 	metricsMux := http.NewServeMux()
 	metricsMux.Handle("/metrics", promhttp.Handler())
 
+	// Start metrics server in background
 	go func() {
 		metricsAddr := ":9090"
 		log.Printf("Starting metrics server on %s", metricsAddr)
@@ -116,15 +128,33 @@ func main() {
 		}
 	}()
 
-	http.HandleFunc("/health", healthHandler)
-	http.HandleFunc("/", proxyHandler(proxies, cfg.Backends, circuitBreakers, healthChecker))
+	// Start main server in background
+	go func() {
+		addr := fmt.Sprintf(":%d", cfg.Server.Port)
+		log.Printf("Starting load balancer on %s", addr)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Server failed: %v", err)
+		}
+	}()
 
-	addr := fmt.Sprintf(":%d", cfg.Server.Port)
-	log.Printf("Starting load balancer on %s", addr)
+	// Setup signal handling
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT)
 
-	if err := http.ListenAndServe(addr, nil); err != nil {
-		log.Fatalf("Server failed: %v", err)
+	// Wait for shutdown signal
+	sig := <-sigChan
+	log.Printf("Received signal %v, shutting down gracefully...", sig)
+
+	healthChecker.Stop()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := server.Shutdown(ctx); err != nil {
+		log.Printf("Server shutdown error: %v", err)
 	}
+
+	log.Println("Shutdown complete")
 }
 
 func createProxy(backendURL string, circuitBreaker *circuitbreaker.CircuitBreaker) (*httputil.ReverseProxy, error) {
