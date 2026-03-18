@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"net/http/httputil"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -33,29 +32,22 @@ func TestRoundRobinDistribution(t *testing.T) {
 		defer backends[i].Close()
 	}
 
-	proxies := make([]*httputil.ReverseProxy, 3)
-	circuitBreakers := make([]*circuitbreaker.CircuitBreaker, 3)
-
+	lbBackends := make([]*Backend, 3)
 	for i := range 3 {
-		circuitBreakers[i] = circuitbreaker.New(fmt.Sprintf(":%d", i), 5, 10*time.Second)
-
-		proxy, err := createProxy(backends[i].URL, circuitBreakers[i])
-		if err != nil {
-			t.Fatalf("Failed to create proxy for backend %d: %v", i, err)
-		}
-		proxies[i] = proxy
+		cb := circuitbreaker.New(fmt.Sprintf(":%d", i), 5, 10*time.Second)
+		lbBackends[i] = createProxy(backends[i].URL, cb)
 	}
 
 	hc := health.NewChecker(3)
 
 	numRequests := 300
 	for range numRequests {
-		backend := selectBackend(proxies, circuitBreakers, hc)
+		backend := selectBackend(lbBackends, hc)
 
 		req := httptest.NewRequest("GET", "/", nil)
 		rec := httptest.NewRecorder()
 
-		proxies[backend].ServeHTTP(rec, req)
+		backend.Proxy.ServeHTTP(rec, req)
 	}
 
 	expected := numRequests / 3
@@ -90,17 +82,10 @@ func TestHealthCheckFailover(t *testing.T) {
 		defer backends[i].Close()
 	}
 
-	proxies := make([]*httputil.ReverseProxy, 3)
-	circuitBreakers := make([]*circuitbreaker.CircuitBreaker, 3)
-
+	lbBackends := make([]*Backend, 3)
 	for i := range 3 {
-		circuitBreakers[i] = circuitbreaker.New(fmt.Sprintf(":%d", i), 5, 10*time.Second)
-
-		proxy, err := createProxy(backends[i].URL, circuitBreakers[i])
-		if err != nil {
-			t.Fatalf("Failed to create proxy for backend %d: %v", i, err)
-		}
-		proxies[i] = proxy
+		cb := circuitbreaker.New(fmt.Sprintf(":%d", i), 5, 10*time.Second)
+		lbBackends[i] = createProxy(backends[i].URL, cb)
 	}
 
 	hc := health.NewChecker(3)
@@ -112,12 +97,12 @@ func TestHealthCheckFailover(t *testing.T) {
 
 	numRequests := 300
 	for range numRequests {
-		backend := selectBackend(proxies, circuitBreakers, hc)
+		backend := selectBackend(lbBackends, hc)
 
 		req := httptest.NewRequest("GET", "/", nil)
 		rec := httptest.NewRecorder()
 
-		proxies[backend].ServeHTTP(rec, req)
+		backend.Proxy.ServeHTTP(rec, req)
 	}
 
 	// Backend 0: should get ~100 requests (1/3 of 300)
@@ -160,25 +145,18 @@ func TestCircuitBreakerOpens(t *testing.T) {
 	}))
 	defer badBackend.Close()
 
-	proxies := make([]*httputil.ReverseProxy, 2)
-	circuitBreakers := make([]*circuitbreaker.CircuitBreaker, 2)
-
-	circuitBreakers[0] = circuitbreaker.New(goodBackend.URL, 3, 10*time.Second)
-	proxy0, _ := createProxy(goodBackend.URL, circuitBreakers[0])
-	proxies[0] = proxy0
-
-	circuitBreakers[1] = circuitbreaker.New(badBackend.URL, 3, 10*time.Second)
-	proxy1, _ := createProxy(badBackend.URL, circuitBreakers[1])
-	proxies[1] = proxy1
+	lbBackends := make([]*Backend, 2)
+	lbBackends[0] = createProxy(goodBackend.URL, circuitbreaker.New(goodBackend.URL, 3, 10*time.Second))
+	lbBackends[1] = createProxy(badBackend.URL, circuitbreaker.New(badBackend.URL, 3, 10*time.Second))
 
 	hc := health.NewChecker(2)
 
 	// Make requests - bad backend will fail and circuit will open
 	for range 20 {
-		backend := selectBackend(proxies, circuitBreakers, hc)
+		backend := selectBackend(lbBackends, hc)
 		req := httptest.NewRequest("GET", "/", nil)
 		rec := httptest.NewRecorder()
-		proxies[backend].ServeHTTP(rec, req)
+		backend.Proxy.ServeHTTP(rec, req)
 	}
 
 	t.Logf("Bad backend received %d requests (circuit should have opened after 3)", badCount.Load())
