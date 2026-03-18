@@ -26,10 +26,16 @@ var (
 	counter uint64
 
 	// Prometheus metrics
-	requestsTotal   *prometheus.CounterVec
-	requestDuration *prometheus.HistogramVec
-	backendHealthy  *prometheus.GaugeVec
+	requestsTotal   *prometheus.CounterVec   // Counter that only goes up
+	backendHealthy  *prometheus.GaugeVec     // Gauge that can only go up and down
+	requestDuration *prometheus.HistogramVec // A bucket with lots of values
 )
+
+type Backend struct {
+	URL            string
+	Proxy          *httputil.ReverseProxy
+	CircuitBreaker *circuitbreaker.CircuitBreaker
+}
 
 type responseWriter struct {
 	http.ResponseWriter
@@ -55,22 +61,22 @@ func healthHandler(w http.ResponseWriter, _ *http.Request) {
 }
 
 // Forwards requests to backends
-func proxyHandler(proxies []*httputil.ReverseProxy, backends []config.BackendConfig, circuitBreakers []*circuitbreaker.CircuitBreaker, healthChecker *health.Checker) http.HandlerFunc {
+func proxyHandler(backends []*Backend, healthChecker *health.Checker) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 
 		wrapped := wrapResponseWriter(w)
 
-		backend := selectBackend(proxies, circuitBreakers, healthChecker)
-		backendURL := backends[backend].URL
+		backend := selectBackend(backends, healthChecker)
+		backendURL := backend.URL
 
 		// Increment backend request counter
 		requestsTotal.WithLabelValues(backendURL).Inc()
 
 		// Forward request to backend
-		proxies[backend].ServeHTTP(wrapped, r)
+		backend.Proxy.ServeHTTP(wrapped, r)
 
-		circuitBreakers[backend].RecordSuccess()
+		backend.CircuitBreaker.RecordSuccess()
 
 		duration := time.Since(start).Seconds()
 		requestDuration.WithLabelValues(backendURL).Observe(duration) // Add measurement to histogram
@@ -121,27 +127,18 @@ func main() {
 	prometheus.MustRegister(requestDuration)
 	prometheus.MustRegister(backendHealthy)
 
-	var proxies []*httputil.ReverseProxy
-	circuitBreakers := make([]*circuitbreaker.CircuitBreaker, len(cfg.Backends))
-
-	for i, backend := range cfg.Backends {
-		circuitBreakers[i] = circuitbreaker.New(backend.URL, 3, 30*time.Second)
-
-		proxy, err := createProxy(backend.URL, circuitBreakers[i])
-		if err != nil {
-			log.Fatalf("Failed to create proxy for %s: %v", backend.URL, err)
-		}
-		proxies = append(proxies, proxy)
-	}
+	var backends []*Backend = make([]*Backend, len(cfg.Backends))
 
 	healthChecker := health.NewChecker(len(cfg.Backends))
 
 	for i, backend := range cfg.Backends {
+		cb := circuitbreaker.New(backend.URL, 3, 30*time.Second)
+		backends[i] = createProxy(backend.URL, cb)
 		healthChecker.StartChecking(i, backend.URL, backendHealthy)
 	}
 
 	http.HandleFunc("/health", healthHandler)
-	http.HandleFunc("/", proxyHandler(proxies, cfg.Backends, circuitBreakers, healthChecker))
+	http.HandleFunc("/", proxyHandler(backends, healthChecker))
 
 	server := &http.Server{
 		Addr: fmt.Sprintf(":%d", cfg.Server.Port),
@@ -188,10 +185,10 @@ func main() {
 	log.Println("Shutdown complete")
 }
 
-func createProxy(backendURL string, circuitBreaker *circuitbreaker.CircuitBreaker) (*httputil.ReverseProxy, error) {
+func createProxy(backendURL string, circuitBreaker *circuitbreaker.CircuitBreaker) *Backend {
 	target, err := url.Parse(backendURL)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse backend server url %s: %w", backendURL, err)
+		log.Fatal(fmt.Errorf("failed to parse backend server url %s: %w", backendURL, err))
 	}
 	proxy := httputil.NewSingleHostReverseProxy(target)
 
@@ -214,10 +211,14 @@ func createProxy(backendURL string, circuitBreaker *circuitbreaker.CircuitBreake
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 	}
 
-	return proxy, nil
+	return &Backend{
+		URL:            backendURL,
+		Proxy:          proxy,
+		CircuitBreaker: circuitBreaker,
+	}
 }
 
-func selectBackend(backends []*httputil.ReverseProxy, circuitBreakers []*circuitbreaker.CircuitBreaker, healthChecker *health.Checker) int {
+func selectBackend(backends []*Backend, healthChecker *health.Checker) *Backend {
 	next := atomic.AddUint64(&counter, 1)
 	backendCount := len(backends)
 
@@ -228,13 +229,13 @@ func selectBackend(backends []*httputil.ReverseProxy, circuitBreakers []*circuit
 			continue
 		}
 
-		if !circuitBreakers[idx].CanAttempt() {
+		if !backends[idx].CircuitBreaker.CanAttempt() {
 			continue
 		}
 
-		return idx
+		return backends[idx]
 	}
 
 	// All backends unhealthy or circuits open just return the first one
-	return int(next % uint64(len(backends)))
+	return backends[int(next%uint64(len(backends)))]
 }
