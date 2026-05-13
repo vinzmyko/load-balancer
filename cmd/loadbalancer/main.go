@@ -26,9 +26,10 @@ var (
 	counter uint64
 
 	// Prometheus metrics
-	requestsTotal   *prometheus.CounterVec   // Counter that only goes up
-	backendHealthy  *prometheus.GaugeVec     // Gauge that can only go up and down
-	requestDuration *prometheus.HistogramVec // A bucket with lots of values
+	requestsTotal       *prometheus.CounterVec   // Counter that only goes up
+	backendHealthy      *prometheus.GaugeVec     // Gauge that can only go up and down
+	requestDuration     *prometheus.HistogramVec // A bucket with lots of values
+	circuitBreakerState *prometheus.GaugeVec
 )
 
 type Backend struct {
@@ -109,7 +110,7 @@ func main() {
 		prometheus.HistogramOpts{
 			Name:    "loadbalancer_request_duration_seconds",
 			Help:    "Request duration in seconds",
-			Buckets: prometheus.DefBuckets, // Default ranges e.g. [5ms, 10ms ,25ms ,50ms,  100ms, etc.]
+			Buckets: prometheus.DefBuckets,
 		},
 		[]string{"backend", "status_code"},
 	)
@@ -122,16 +123,27 @@ func main() {
 		[]string{"backends"},
 	)
 
+	circuitBreakerState = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "loadbalancer_circuit_breaker_state",
+			Help: "Circuit breaker state (0 = closed, 1 = open, 2 = half open)",
+		},
+		[]string{"backend"},
+	)
+
 	prometheus.MustRegister(requestsTotal)
 	prometheus.MustRegister(requestDuration)
 	prometheus.MustRegister(backendHealthy)
+	prometheus.MustRegister(circuitBreakerState)
 
-	var backends []*Backend = make([]*Backend, len(cfg.Backends))
+	backends := make([]*Backend, len(cfg.Backends))
 
 	healthChecker := health.NewChecker(len(cfg.Backends))
 
 	for i, backend := range cfg.Backends {
-		cb := circuitbreaker.New(backend.URL, 3, 30*time.Second)
+		cb := circuitbreaker.New(backend.URL, 3, 30*time.Second, func(state circuitbreaker.CircuitState) {
+			circuitBreakerState.WithLabelValues(backend.URL).Set(float64(state))
+		})
 		backends[i] = createProxy(backend.URL, cb)
 		healthChecker.StartChecking(i, backend.URL, backendHealthy)
 	}

@@ -24,16 +24,18 @@ type CircuitBreaker struct {
 	failureThreshold int
 	timeout          time.Duration
 	mu               sync.Mutex
+	onStateChange    func(state CircuitState) // Signal/Callable
 }
 
 // New creates a new circuit breaker
-func New(backendURL string, failureThreshold int, timeout time.Duration) *CircuitBreaker {
+func New(backendURL string, failureThreshold int, timeout time.Duration, callable func(state CircuitState)) *CircuitBreaker {
 	return &CircuitBreaker{
 		backendURL:       backendURL,
 		state:            stateClosed,
 		failures:         0,
 		failureThreshold: failureThreshold,
 		timeout:          timeout,
+		onStateChange:    callable,
 	}
 }
 
@@ -69,7 +71,11 @@ func (cb *CircuitBreaker) RecordSuccess() {
 	defer cb.mu.Unlock()
 
 	if cb.state == stateHalfOpen {
+		cb.state = stateClosed
 		log.Printf("Circuit CLOSED for backend %s - backend recovered", cb.backendURL)
+		if cb.onStateChange != nil {
+			cb.onStateChange(cb.state)
+		}
 	}
 
 	cb.failures = 0
@@ -86,9 +92,15 @@ func (cb *CircuitBreaker) RecordFailure() {
 	if cb.state == stateHalfOpen {
 		// Failed so open the state (Unhealthy)
 		cb.state = stateOpen
+		if cb.onStateChange != nil {
+			cb.onStateChange(cb.state)
+		}
 		log.Printf("Circuit OPENED for backend %s", cb.backendURL)
 	} else if cb.failures >= cb.failureThreshold {
 		cb.state = stateOpen
+		if cb.onStateChange != nil {
+			cb.onStateChange(cb.state)
+		}
 		log.Printf("Circuit OPENED for backend %s", cb.backendURL)
 	}
 }

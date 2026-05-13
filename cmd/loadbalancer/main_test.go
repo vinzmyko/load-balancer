@@ -34,7 +34,7 @@ func TestRoundRobinDistribution(t *testing.T) {
 
 	lbBackends := make([]*Backend, 3)
 	for i := range 3 {
-		cb := circuitbreaker.New(fmt.Sprintf(":%d", i), 5, 10*time.Second)
+		cb := circuitbreaker.New(fmt.Sprintf(":%d", i), 5, 10*time.Second, nil)
 		lbBackends[i] = createProxy(backends[i].URL, cb)
 	}
 
@@ -84,7 +84,7 @@ func TestHealthCheckFailover(t *testing.T) {
 
 	lbBackends := make([]*Backend, 3)
 	for i := range 3 {
-		cb := circuitbreaker.New(fmt.Sprintf(":%d", i), 5, 10*time.Second)
+		cb := circuitbreaker.New(fmt.Sprintf(":%d", i), 5, 10*time.Second, nil)
 		lbBackends[i] = createProxy(backends[i].URL, cb)
 	}
 
@@ -146,8 +146,8 @@ func TestCircuitBreakerOpens(t *testing.T) {
 	defer badBackend.Close()
 
 	lbBackends := make([]*Backend, 2)
-	lbBackends[0] = createProxy(goodBackend.URL, circuitbreaker.New(goodBackend.URL, 3, 10*time.Second))
-	lbBackends[1] = createProxy(badBackend.URL, circuitbreaker.New(badBackend.URL, 3, 10*time.Second))
+	lbBackends[0] = createProxy(goodBackend.URL, circuitbreaker.New(goodBackend.URL, 3, 10*time.Second, nil))
+	lbBackends[1] = createProxy(badBackend.URL, circuitbreaker.New(badBackend.URL, 3, 10*time.Second, nil))
 
 	hc := health.NewChecker(2)
 
