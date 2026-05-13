@@ -77,7 +77,8 @@ func proxyHandler(backends []*Backend, healthChecker *health.Checker) http.Handl
 		backend.Proxy.ServeHTTP(wrapped, r)
 
 		duration := time.Since(start).Seconds()
-		requestDuration.WithLabelValues(backendURL).Observe(duration) // Add measurement to histogram
+		statusCode := fmt.Sprintf("%d", wrapped.statusCode)
+		requestDuration.WithLabelValues(backendURL, statusCode).Observe(duration) // Add measurement to histogram
 
 		slog.Info("request",
 			"method", r.Method,
@@ -110,7 +111,7 @@ func main() {
 			Help:    "Request duration in seconds",
 			Buckets: prometheus.DefBuckets, // Default ranges e.g. [5ms, 10ms ,25ms ,50ms,  100ms, etc.]
 		},
-		[]string{"backend"},
+		[]string{"backend", "status_code"},
 	)
 
 	backendHealthy = prometheus.NewGaugeVec(
