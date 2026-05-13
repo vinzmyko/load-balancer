@@ -76,8 +76,6 @@ func proxyHandler(backends []*Backend, healthChecker *health.Checker) http.Handl
 		// Forward request to backend
 		backend.Proxy.ServeHTTP(wrapped, r)
 
-		backend.CircuitBreaker.RecordSuccess()
-
 		duration := time.Since(start).Seconds()
 		requestDuration.WithLabelValues(backendURL).Observe(duration) // Add measurement to histogram
 
