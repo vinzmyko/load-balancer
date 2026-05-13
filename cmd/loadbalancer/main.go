@@ -62,7 +62,7 @@ func healthHandler(w http.ResponseWriter, _ *http.Request) {
 }
 
 // Forwards requests to backends
-func proxyHandler(backends []*Backend, healthChecker *health.Checker) http.HandlerFunc {
+func routeHandler(backends []*Backend, healthChecker *health.Checker) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 
@@ -149,7 +149,7 @@ func main() {
 	}
 
 	http.HandleFunc("/health", healthHandler)
-	http.HandleFunc("/", proxyHandler(backends, healthChecker))
+	http.HandleFunc("/", routeHandler(backends, healthChecker))
 
 	server := &http.Server{
 		Addr: fmt.Sprintf(":%d", cfg.Server.Port),
