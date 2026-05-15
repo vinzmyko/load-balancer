@@ -20,6 +20,7 @@ import (
 	"github.com/vinzmyko/load-balancer/internal/circuitbreaker"
 	"github.com/vinzmyko/load-balancer/internal/config"
 	"github.com/vinzmyko/load-balancer/internal/health"
+	"github.com/vinzmyko/load-balancer/internal/telemetry"
 )
 
 var (
@@ -93,6 +94,8 @@ func routeHandler(backends []*Backend, healthChecker *health.Checker) http.Handl
 }
 
 func main() {
+	shutdown := telemetry.InitTracer(context.Background())
+
 	cfg, err := config.Load("config.yaml")
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
@@ -191,6 +194,10 @@ func main() {
 
 	if err := server.Shutdown(ctx); err != nil {
 		log.Printf("Server shutdown error: %v", err)
+	}
+
+	if err := shutdown(ctx); err != nil {
+		log.Printf("Tracer shutdown error: %v", err)
 	}
 
 	log.Println("Shutdown complete")
