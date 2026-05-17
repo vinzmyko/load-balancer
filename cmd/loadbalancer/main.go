@@ -16,6 +16,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/vinzmyko/load-balancer/internal/circuitbreaker"
 	"github.com/vinzmyko/load-balancer/internal/config"
@@ -65,6 +67,9 @@ func healthHandler(w http.ResponseWriter, _ *http.Request) {
 // Forwards requests to backends
 func routeHandler(backends []*Backend, healthChecker *health.Checker) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		tracer := otel.Tracer("load-balancer")
+		ctx, span := tracer.Start(r.Context(), "handle-request")
+		defer span.End()
 		start := time.Now()
 
 		wrapped := wrapResponseWriter(w)
@@ -75,8 +80,21 @@ func routeHandler(backends []*Backend, healthChecker *health.Checker) http.Handl
 		// Increment backend request counter
 		requestsTotal.WithLabelValues(backendURL).Inc()
 
+		_, childSpan := tracer.Start(ctx, "proxy-to-backend")
 		// Forward request to backend
 		backend.Proxy.ServeHTTP(wrapped, r)
+		childSpan.SetAttributes(
+			attribute.String("backend.url", backendURL),
+			attribute.Int("http.status_code", wrapped.statusCode),
+		)
+		childSpan.End()
+
+		span.SetAttributes(
+			attribute.String("http.method", r.Method),
+			attribute.String("http.path", r.URL.Path),
+			attribute.String("backend.url", backendURL),
+			attribute.Int("http.status_code", wrapped.statusCode),
+		)
 
 		duration := time.Since(start).Seconds()
 		statusCode := fmt.Sprintf("%d", wrapped.statusCode)
