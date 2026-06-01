@@ -112,6 +112,7 @@ func routeHandler(backends []*Backend, healthChecker *health.Checker) http.Handl
 		duration := time.Since(start).Seconds()
 		statusCode := fmt.Sprintf("%d", wrapped.statusCode)
 		requestDuration.WithLabelValues(backendURL, statusCode).Observe(duration) // Add measurement to histogram
+		spanTraceID := span.SpanContext().TraceID().String()
 
 		slog.Info("request",
 			"method", r.Method,
@@ -120,6 +121,7 @@ func routeHandler(backends []*Backend, healthChecker *health.Checker) http.Handl
 			"status", wrapped.statusCode,
 			"duration_ms", duration*1000,
 			"remote_addr", r.RemoteAddr,
+			"trace_id", spanTraceID,
 		)
 	}
 }
