@@ -18,6 +18,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
 
 	"github.com/vinzmyko/load-balancer/internal/circuitbreaker"
 	"github.com/vinzmyko/load-balancer/internal/config"
@@ -81,6 +83,10 @@ func routeHandler(backends []*Backend, healthChecker *health.Checker) http.Handl
 		requestsTotal.WithLabelValues(backendURL).Inc()
 
 		_, childSpan := tracer.Start(ctx, "proxy-to-backend")
+
+		// Inject trace context onto request headers before proxy forwards to backend
+		otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(r.Header))
+
 		// Forward request to backend
 		backend.Proxy.ServeHTTP(wrapped, r)
 		childSpan.SetAttributes(
@@ -88,6 +94,13 @@ func routeHandler(backends []*Backend, healthChecker *health.Checker) http.Handl
 			attribute.Int("http.status_code", wrapped.statusCode),
 		)
 		childSpan.End()
+
+		// Set the span status
+		if wrapped.statusCode >= 500 {
+			span.SetStatus(codes.Error, fmt.Sprintf("server error: %d", wrapped.statusCode))
+		} else {
+			span.SetStatus(codes.Ok, "")
+		}
 
 		span.SetAttributes(
 			attribute.String("http.method", r.Method),
