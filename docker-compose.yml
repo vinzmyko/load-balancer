@@ -13,3 +13,16 @@ services:
     volumes:
       - "./tempo.yaml:/etc/tempo.yaml"
     command: "-config.file=/etc/tempo.yaml"
+  loki:
+    image: "grafana/loki:latest"
+    ports:
+      - "3100:3100"
+    volumes:
+      - "./loki.yaml:/etc/loki/local-config.yaml"
+  promtail:
+    image: "grafana/promtail:latest"
+    user: root
+    volumes:
+      - "/var/lib/docker/containers:/var/lib/docker/containers:ro"
+      - "./promtail.yaml:/etc/promtail/config.yaml"
+    command: "-config.file=/etc/promtail/config.yaml"
