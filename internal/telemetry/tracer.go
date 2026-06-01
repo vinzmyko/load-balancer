@@ -7,6 +7,7 @@ import (
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	"go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/semconv/v1.26.0"
@@ -34,6 +35,9 @@ func InitTracer(ctx context.Context) func(context.Context) error {
 
 	// Tell OpenTelemetry this is the provider to use
 	otel.SetTracerProvider(tp)
+
+	// Trace parent header propagated to backends
+	otel.SetTextMapPropagator(propagation.TraceContext{})
 
 	// Flush any spans still in the batcher
 	return tp.Shutdown
