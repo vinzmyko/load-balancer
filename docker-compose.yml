@@ -1,4 +1,11 @@
 services:
+  loadbalancer:
+    build: .
+    network_mode: "host"
+    depends_on:
+      - tempo
+    logging:
+      driver: json-file
   grafana:
     image: grafana/grafana:latest
     ports:
