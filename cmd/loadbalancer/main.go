@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 	"log/slog"
 	"net/http"
 	"net/http/httputil"
@@ -112,17 +111,6 @@ func routeHandler(backends []*Backend, healthChecker *health.Checker) http.Handl
 		duration := time.Since(start).Seconds()
 		statusCode := fmt.Sprintf("%d", wrapped.statusCode)
 		requestDuration.WithLabelValues(backendURL, statusCode).Observe(duration) // Add measurement to histogram
-		spanTraceID := span.SpanContext().TraceID().String()
-
-		slog.Info("request",
-			"method", r.Method,
-			"path", r.URL.Path,
-			"backend", backendURL,
-			"status", wrapped.statusCode,
-			"duration_ms", duration*1000,
-			"remote_addr", r.RemoteAddr,
-			"trace_id", spanTraceID,
-		)
 	}
 }
 
@@ -131,7 +119,9 @@ func main() {
 
 	cfg, err := config.Load("config.yaml")
 	if err != nil {
-		log.Fatalf("Failed to load config: %v", err)
+		slog.Error("Failed to load config",
+			"error", err)
+		os.Exit(1)
 	}
 
 	requestsTotal = prometheus.NewCounterVec(
@@ -199,18 +189,23 @@ func main() {
 	// Start metrics server in background
 	go func() {
 		metricsAddr := ":9090"
-		log.Printf("Starting metrics server on %s", metricsAddr)
+		slog.Info("Starting metrics",
+			"server", metricsAddr)
 		if err := http.ListenAndServe(metricsAddr, metricsMux); err != nil {
-			log.Fatalf("Metrics server failed: %v", err)
+			slog.Error("Metric server failed",
+				"server", metricsAddr,
+				"error", err)
 		}
 	}()
 
 	// Start main server in background
 	go func() {
 		addr := fmt.Sprintf(":%d", cfg.Server.Port)
-		log.Printf("Starting load balancer on %s", addr)
+		slog.Info("Starting load balancer",
+			"address", addr)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Server failed: %v", err)
+			slog.Error("Server failed",
+				"error", err)
 		}
 	}()
 
@@ -220,7 +215,8 @@ func main() {
 
 	// Wait for shutdown signal
 	sig := <-sigChan
-	log.Printf("Received signal %v, shutting down gracefully...", sig)
+	slog.Info("Shutting down gracefully",
+		"signal", sig)
 
 	healthChecker.Stop()
 
@@ -228,20 +224,26 @@ func main() {
 	defer cancel()
 
 	if err := server.Shutdown(ctx); err != nil {
-		log.Printf("Server shutdown error: %v", err)
+		slog.Error("Server shutdown error",
+			"error", err)
 	}
 
 	if err := shutdown(ctx); err != nil {
-		log.Printf("Tracer shutdown error: %v", err)
+		slog.Error("Tracer shutdown error",
+			"error", err)
 	}
 
-	log.Println("Shutdown complete")
+	slog.Info("Shutdown complete")
 }
 
 func createProxy(backendURL string, circuitBreaker *circuitbreaker.CircuitBreaker) *Backend {
 	target, err := url.Parse(backendURL)
 	if err != nil {
-		log.Fatal(fmt.Errorf("failed to parse backend server url %s: %w", backendURL, err))
+		slog.Error("Backend server parse error",
+			"backend_url", backendURL,
+			"error", err,
+		)
+		os.Exit(1)
 	}
 	proxy := httputil.NewSingleHostReverseProxy(target)
 
@@ -259,7 +261,10 @@ func createProxy(backendURL string, circuitBreaker *circuitbreaker.CircuitBreake
 
 	// Called on errors
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-		log.Printf("Proxy error for %s: %v", backendURL, err)
+		slog.Error("Proxy error",
+			"backend_url", backendURL,
+			"error", err,
+		)
 		circuitBreaker.RecordFailure()
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 	}

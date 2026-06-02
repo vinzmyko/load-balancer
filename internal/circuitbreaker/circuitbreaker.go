@@ -2,7 +2,7 @@
 package circuitbreaker
 
 import (
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -52,7 +52,8 @@ func (cb *CircuitBreaker) CanAttempt() bool {
 		// Check if timeout has passed
 		if time.Since(cb.lastFailureTime) > cb.timeout {
 			cb.state = stateHalfOpen
-			log.Printf("Circuit HALF-OPEN for backend %s - testing recovery", cb.backendURL)
+			slog.Warn("Circuit HALF-OPEN",
+				"backend_url", cb.backendURL)
 			return true
 		}
 		return false
@@ -72,7 +73,8 @@ func (cb *CircuitBreaker) RecordSuccess() {
 
 	if cb.state == stateHalfOpen {
 		cb.state = stateClosed
-		log.Printf("Circuit CLOSED for backend %s - backend recovered", cb.backendURL)
+		slog.Info("Circuit CLOSED",
+			"backend_url", cb.backendURL)
 		if cb.onStateChange != nil {
 			cb.onStateChange(cb.state)
 		}
@@ -95,12 +97,14 @@ func (cb *CircuitBreaker) RecordFailure() {
 		if cb.onStateChange != nil {
 			cb.onStateChange(cb.state)
 		}
-		log.Printf("Circuit OPENED for backend %s", cb.backendURL)
+		slog.Warn("Circuit OPENED",
+			"backend_url", cb.backendURL)
 	} else if cb.failures >= cb.failureThreshold {
 		cb.state = stateOpen
 		if cb.onStateChange != nil {
 			cb.onStateChange(cb.state)
 		}
-		log.Printf("Circuit OPENED for backend %s", cb.backendURL)
+		slog.Warn("Circuit OPENED",
+			"backend_url", cb.backendURL)
 	}
 }

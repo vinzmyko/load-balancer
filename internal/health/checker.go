@@ -2,7 +2,7 @@
 package health
 
 import (
-	"log"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -46,17 +46,22 @@ func (hc *Checker) StartChecking(idx int, backendURL string, gauge *prometheus.G
 				hc.healthMutex.Lock()
 				if hc.healthStatus[idx] != isHealthy {
 					if isHealthy {
-						log.Printf("Backend %d (%s) is now HEALTHY", idx, backendURL)
+						slog.Info("Backend is now HEALTHY",
+							"index", idx,
+							"backend_url", backendURL)
 						gauge.WithLabelValues(backendURL).Set(1)
 					} else {
-						log.Printf("Backend %d (%s) is now UNHEALTHY", idx, backendURL)
+						slog.Warn("Backend is now UNHEALTHY",
+							"index", idx,
+							"backend_url", backendURL)
 						gauge.WithLabelValues(backendURL).Set(0)
 					}
 					hc.healthStatus[idx] = isHealthy
 				}
 				hc.healthMutex.Unlock()
 			case <-stopChan:
-				log.Printf("Stopping health checker for %s", backendURL)
+				slog.Info("Stopping health checker",
+					"backend_url", backendURL)
 				return
 			}
 		}
