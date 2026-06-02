@@ -172,6 +172,8 @@ func main() {
 	prometheus.MustRegister(backendHealthy)
 	prometheus.MustRegister(circuitBreakerState)
 
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+
 	backends := make([]*Backend, len(cfg.Backends))
 
 	healthChecker := health.NewChecker(len(cfg.Backends))

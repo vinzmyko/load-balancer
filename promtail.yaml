@@ -12,3 +12,16 @@ scrape_configs:
         labels:
           job: docker
           __path__: /var/lib/docker/containers/*/*-json.log
+    pipeline_stages:
+      - json:
+          expressions:
+            output: log
+            stream: stream
+      - json:
+          source: output
+          expressions:
+            level: level
+            trace_id: trace_id
+            status: status
+      - output:
+          source: output
