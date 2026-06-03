@@ -26,15 +26,58 @@ import (
 	"github.com/vinzmyko/load-balancer/internal/telemetry"
 )
 
-var (
-	counter uint64
+var counter uint64
 
-	// Prometheus metrics
+// Metrics contain the Prometheus metrics
+type Metrics struct {
 	requestsTotal       *prometheus.CounterVec   // Counter that only goes up
 	backendHealthy      *prometheus.GaugeVec     // Gauge that can only go up and down
 	requestDuration     *prometheus.HistogramVec // A bucket with lots of values
 	circuitBreakerState *prometheus.GaugeVec
-)
+}
+
+func newMetrics() *Metrics {
+	m := &Metrics{
+		requestsTotal: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "loadbalancer_requests_total",
+				Help: "Total number of requests forwarded to each backend",
+			},
+			[]string{"backend"},
+		),
+		requestDuration: prometheus.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Name:    "loadbalancer_request_duration_seconds",
+				Help:    "Request duration in seconds",
+				Buckets: prometheus.DefBuckets,
+			},
+			[]string{"backend", "status_code"},
+		),
+		backendHealthy: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "loadbalancer_backend_healthy",
+				Help: "Backend health status (1 = healthy, 0 = unhealthy)",
+			},
+			[]string{"backends"},
+		),
+		circuitBreakerState: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "loadbalancer_circuit_breaker_state",
+				Help: "Circuit breaker state (0 = closed, 1 = open, 2 = half open)",
+			},
+			[]string{"backend"},
+		),
+	}
+
+	prometheus.MustRegister(
+		m.requestsTotal,
+		m.requestDuration,
+		m.backendHealthy,
+		m.circuitBreakerState,
+	)
+
+	return m
+}
 
 type Backend struct {
 	URL            string
@@ -66,7 +109,7 @@ func healthHandler(w http.ResponseWriter, _ *http.Request) {
 }
 
 // Forwards requests to backends
-func routeHandler(backends []*Backend, healthChecker *health.Checker) http.HandlerFunc {
+func routeHandler(backends []*Backend, healthChecker *health.Checker, metrics *Metrics) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		tracer := otel.Tracer("load-balancer")
 		ctx, span := tracer.Start(r.Context(), "handle-request")
@@ -79,7 +122,7 @@ func routeHandler(backends []*Backend, healthChecker *health.Checker) http.Handl
 		backendURL := backend.URL
 
 		// Increment backend request counter
-		requestsTotal.WithLabelValues(backendURL).Inc()
+		metrics.requestsTotal.WithLabelValues(backendURL).Inc()
 
 		_, childSpan := tracer.Start(ctx, "proxy-to-backend")
 
@@ -110,7 +153,7 @@ func routeHandler(backends []*Backend, healthChecker *health.Checker) http.Handl
 
 		duration := time.Since(start).Seconds()
 		statusCode := fmt.Sprintf("%d", wrapped.statusCode)
-		requestDuration.WithLabelValues(backendURL, statusCode).Observe(duration) // Add measurement to histogram
+		metrics.requestDuration.WithLabelValues(backendURL, statusCode).Observe(duration) // Add measurement to histogram
 	}
 }
 
@@ -124,43 +167,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	requestsTotal = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "loadbalancer_requests_total",
-			Help: "Total number of requests forwarded to each backend",
-		},
-		[]string{"backend"}, // Label
-	)
-
-	requestDuration = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Name:    "loadbalancer_request_duration_seconds",
-			Help:    "Request duration in seconds",
-			Buckets: prometheus.DefBuckets,
-		},
-		[]string{"backend", "status_code"},
-	)
-
-	backendHealthy = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "loadbalancer_backend_healthy",
-			Help: "Backend health status (1 = healthy, 0 = unhealthy)",
-		},
-		[]string{"backends"},
-	)
-
-	circuitBreakerState = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "loadbalancer_circuit_breaker_state",
-			Help: "Circuit breaker state (0 = closed, 1 = open, 2 = half open)",
-		},
-		[]string{"backend"},
-	)
-
-	prometheus.MustRegister(requestsTotal)
-	prometheus.MustRegister(requestDuration)
-	prometheus.MustRegister(backendHealthy)
-	prometheus.MustRegister(circuitBreakerState)
+	metrics := newMetrics()
 
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 
@@ -170,14 +177,14 @@ func main() {
 
 	for i, backend := range cfg.Backends {
 		cb := circuitbreaker.New(backend.URL, 3, 30*time.Second, func(state circuitbreaker.CircuitState) {
-			circuitBreakerState.WithLabelValues(backend.URL).Set(float64(state))
+			metrics.circuitBreakerState.WithLabelValues(backend.URL).Set(float64(state))
 		})
 		backends[i] = createProxy(backend.URL, cb)
-		healthChecker.StartChecking(i, backend.URL, backendHealthy)
+		healthChecker.StartChecking(i, backend.URL, metrics.backendHealthy)
 	}
 
 	http.HandleFunc("/health", healthHandler)
-	http.HandleFunc("/", routeHandler(backends, healthChecker))
+	http.HandleFunc("/", routeHandler(backends, healthChecker, metrics))
 
 	server := &http.Server{
 		Addr: fmt.Sprintf(":%d", cfg.Server.Port),
