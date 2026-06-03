@@ -188,7 +188,7 @@ func main() {
 
 	// Start metrics server in background
 	go func() {
-		metricsAddr := ":9090"
+		metricsAddr := ":9091"
 		slog.Info("Starting metrics",
 			"server", metricsAddr)
 		if err := http.ListenAndServe(metricsAddr, metricsMux); err != nil {
