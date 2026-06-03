@@ -1,11 +1,13 @@
 services:
   loadbalancer:
     build: .
-    network_mode: "host"
+    ports:
+      - "8080:8080"
     depends_on:
       - tempo
-    logging:
-      driver: json-file
+      - backend1
+      - backend2
+      - backend3
   grafana:
     image: grafana/grafana:latest
     ports:
@@ -33,3 +35,24 @@ services:
       - "/var/lib/docker/containers:/var/lib/docker/containers:ro"
       - "./promtail.yaml:/etc/promtail/config.yaml"
     command: "-config.file=/etc/promtail/config.yaml"
+  backend1:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    command: ["./testbackend", "8081"]
+    ports:
+      - "8081:8081"
+  backend2:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    command: ["./testbackend", "8082"]
+    ports:
+      - "8082:8082"
+  backend3:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    command: ["./testbackend", "8083"]
+    ports:
+      - "8083:8083"
