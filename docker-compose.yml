@@ -21,6 +21,7 @@ services:
       - "3000:3000"
     volumes:
       - "./grafana/datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml"
+      - "./grafana/dashboards:/etc/grafana/provisioning/dashboards"
   tempo:
     image: grafana/tempo:latest
     ports:
