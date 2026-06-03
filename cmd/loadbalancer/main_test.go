@@ -13,7 +13,6 @@ import (
 )
 
 func TestRoundRobinDistribution(t *testing.T) {
-	atomic.StoreUint64(&counter, 0)
 	// Create counters for each backend
 	var counts [3]atomic.Uint64
 
@@ -39,10 +38,11 @@ func TestRoundRobinDistribution(t *testing.T) {
 	}
 
 	hc := health.NewChecker(3)
+	lb := newLoadBalancer(lbBackends, hc, nil)
 
 	numRequests := 300
 	for range numRequests {
-		backend := selectBackend(lbBackends, hc)
+		backend := lb.selectBackend()
 
 		req := httptest.NewRequest("GET", "/", nil)
 		rec := httptest.NewRecorder()
@@ -65,7 +65,6 @@ func TestRoundRobinDistribution(t *testing.T) {
 }
 
 func TestHealthCheckFailover(t *testing.T) {
-	atomic.StoreUint64(&counter, 0)
 	var counts [3]atomic.Uint64
 
 	backends := make([]*httptest.Server, 3)
@@ -90,6 +89,7 @@ func TestHealthCheckFailover(t *testing.T) {
 
 	hc := health.NewChecker(3)
 	hc.SetHealthy(1, false)
+	lb := newLoadBalancer(lbBackends, hc, nil)
 
 	for i := range 3 {
 		counts[i].Store(0)
@@ -97,7 +97,7 @@ func TestHealthCheckFailover(t *testing.T) {
 
 	numRequests := 300
 	for range numRequests {
-		backend := selectBackend(lbBackends, hc)
+		backend := lb.selectBackend()
 
 		req := httptest.NewRequest("GET", "/", nil)
 		rec := httptest.NewRecorder()
@@ -128,8 +128,6 @@ func TestHealthCheckFailover(t *testing.T) {
 }
 
 func TestCircuitBreakerOpens(t *testing.T) {
-	atomic.StoreUint64(&counter, 0)
-
 	var goodCount atomic.Uint64
 	var badCount atomic.Uint64
 
@@ -150,10 +148,11 @@ func TestCircuitBreakerOpens(t *testing.T) {
 	lbBackends[1] = createProxy(badBackend.URL, circuitbreaker.New(badBackend.URL, 3, 10*time.Second, nil))
 
 	hc := health.NewChecker(2)
+	lb := newLoadBalancer(lbBackends, hc, nil)
 
 	// Make requests - bad backend will fail and circuit will open
 	for range 20 {
-		backend := selectBackend(lbBackends, hc)
+		backend := lb.selectBackend()
 		req := httptest.NewRequest("GET", "/", nil)
 		rec := httptest.NewRecorder()
 		backend.Proxy.ServeHTTP(rec, req)

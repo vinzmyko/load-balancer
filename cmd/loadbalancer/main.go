@@ -26,7 +26,91 @@ import (
 	"github.com/vinzmyko/load-balancer/internal/telemetry"
 )
 
-var counter uint64
+type LoadBalancer struct {
+	backends      []*Backend
+	healthChecker *health.Checker
+	metrics       *Metrics
+	counter       atomic.Uint64
+}
+
+func newLoadBalancer(backends []*Backend, healthChecker *health.Checker, metrics *Metrics) *LoadBalancer {
+	return &LoadBalancer{
+		backends:      backends,
+		healthChecker: healthChecker,
+		metrics:       metrics,
+	}
+}
+
+func (lb *LoadBalancer) selectBackend() *Backend {
+	next := lb.counter.Add(1)
+	backendCount := len(lb.backends)
+
+	for i := range backendCount {
+		idx := int((next + uint64(i)) % uint64(backendCount))
+
+		if !lb.healthChecker.IsHealthy(idx) {
+			continue
+		}
+
+		if !lb.backends[idx].CircuitBreaker.CanAttempt() {
+			continue
+		}
+
+		return lb.backends[idx]
+	}
+
+	// All backends unhealthy or circuits open just return the first one
+	return lb.backends[int(next%uint64(len(lb.backends)))]
+}
+
+// Forwards requests to backends
+func (lb *LoadBalancer) routeHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		tracer := otel.Tracer("load-balancer")
+		ctx, span := tracer.Start(r.Context(), "handle-request")
+		defer span.End()
+		start := time.Now()
+
+		wrapped := wrapResponseWriter(w)
+
+		backend := lb.selectBackend()
+		backendURL := backend.URL
+
+		// Increment backend request counter
+		lb.metrics.requestsTotal.WithLabelValues(backendURL).Inc()
+
+		_, childSpan := tracer.Start(ctx, "proxy-to-backend")
+
+		// Inject trace context onto request headers before proxy forwards to backend
+		otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(r.Header))
+
+		// Forward request to backend
+		backend.Proxy.ServeHTTP(wrapped, r)
+		childSpan.SetAttributes(
+			attribute.String("backend.url", backendURL),
+			attribute.Int("http.status_code", wrapped.statusCode),
+		)
+		childSpan.End()
+
+		// Set the span status
+		if wrapped.statusCode >= 500 {
+			span.SetStatus(codes.Error, fmt.Sprintf("server error: %d", wrapped.statusCode))
+		} else {
+			span.SetStatus(codes.Ok, "")
+		}
+
+		span.SetAttributes(
+			attribute.String("http.method", r.Method),
+			attribute.String("http.path", r.URL.Path),
+			attribute.String("backend.url", backendURL),
+			attribute.Int("http.status_code", wrapped.statusCode),
+		)
+
+		duration := time.Since(start).Seconds()
+		statusCode := fmt.Sprintf("%d", wrapped.statusCode)
+		lb.metrics.requestDuration.WithLabelValues(backendURL, statusCode).Observe(duration) // Add measurement to histogram
+	}
+}
 
 // Metrics contain the Prometheus metrics
 type Metrics struct {
@@ -108,55 +192,6 @@ func healthHandler(w http.ResponseWriter, _ *http.Request) {
 	w.Write([]byte("OK"))
 }
 
-// Forwards requests to backends
-func routeHandler(backends []*Backend, healthChecker *health.Checker, metrics *Metrics) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		tracer := otel.Tracer("load-balancer")
-		ctx, span := tracer.Start(r.Context(), "handle-request")
-		defer span.End()
-		start := time.Now()
-
-		wrapped := wrapResponseWriter(w)
-
-		backend := selectBackend(backends, healthChecker)
-		backendURL := backend.URL
-
-		// Increment backend request counter
-		metrics.requestsTotal.WithLabelValues(backendURL).Inc()
-
-		_, childSpan := tracer.Start(ctx, "proxy-to-backend")
-
-		// Inject trace context onto request headers before proxy forwards to backend
-		otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(r.Header))
-
-		// Forward request to backend
-		backend.Proxy.ServeHTTP(wrapped, r)
-		childSpan.SetAttributes(
-			attribute.String("backend.url", backendURL),
-			attribute.Int("http.status_code", wrapped.statusCode),
-		)
-		childSpan.End()
-
-		// Set the span status
-		if wrapped.statusCode >= 500 {
-			span.SetStatus(codes.Error, fmt.Sprintf("server error: %d", wrapped.statusCode))
-		} else {
-			span.SetStatus(codes.Ok, "")
-		}
-
-		span.SetAttributes(
-			attribute.String("http.method", r.Method),
-			attribute.String("http.path", r.URL.Path),
-			attribute.String("backend.url", backendURL),
-			attribute.Int("http.status_code", wrapped.statusCode),
-		)
-
-		duration := time.Since(start).Seconds()
-		statusCode := fmt.Sprintf("%d", wrapped.statusCode)
-		metrics.requestDuration.WithLabelValues(backendURL, statusCode).Observe(duration) // Add measurement to histogram
-	}
-}
-
 func main() {
 	shutdown := telemetry.InitTracer(context.Background())
 
@@ -183,8 +218,10 @@ func main() {
 		healthChecker.StartChecking(i, backend.URL, metrics.backendHealthy)
 	}
 
+	lb := newLoadBalancer(backends, healthChecker, metrics)
+
 	http.HandleFunc("/health", healthHandler)
-	http.HandleFunc("/", routeHandler(backends, healthChecker, metrics))
+	http.HandleFunc("/", lb.routeHandler())
 
 	server := &http.Server{
 		Addr: fmt.Sprintf(":%d", cfg.Server.Port),
@@ -281,26 +318,4 @@ func createProxy(backendURL string, circuitBreaker *circuitbreaker.CircuitBreake
 		Proxy:          proxy,
 		CircuitBreaker: circuitBreaker,
 	}
-}
-
-func selectBackend(backends []*Backend, healthChecker *health.Checker) *Backend {
-	next := atomic.AddUint64(&counter, 1)
-	backendCount := len(backends)
-
-	for i := range backendCount {
-		idx := int((next + uint64(i)) % uint64(backendCount))
-
-		if !healthChecker.IsHealthy(idx) {
-			continue
-		}
-
-		if !backends[idx].CircuitBreaker.CanAttempt() {
-			continue
-		}
-
-		return backends[idx]
-	}
-
-	// All backends unhealthy or circuits open just return the first one
-	return backends[int(next%uint64(len(backends)))]
 }
