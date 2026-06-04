@@ -59,7 +59,9 @@ func (lb *LoadBalancer) selectBackend() *Backend {
 		return lb.backends[idx]
 	}
 
-	// All backends unhealthy or circuits open just return the first one
+	// Nothing healthy to pick. Return a backend anyway so we don't crash on nil.
+	// The request will likely fail, but the circuit breaker records that and the
+	// client gets a 502.
 	return lb.backends[int(next%uint64(len(lb.backends)))]
 }
 
@@ -79,13 +81,14 @@ func (lb *LoadBalancer) routeHandler() http.HandlerFunc {
 		// Increment backend request counter
 		lb.metrics.requestsTotal.WithLabelValues(backendURL).Inc()
 
-		_, childSpan := tracer.Start(ctx, "proxy-to-backend")
+		proxyCtx, childSpan := tracer.Start(ctx, "proxy-to-backend")
 
-		// Inject trace context onto request headers before proxy forwards to backend
-		otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(r.Header))
+		// Inject the child span's context onto request headers before proxy forwards to backend
+		otel.GetTextMapPropagator().Inject(proxyCtx, propagation.HeaderCarrier(r.Header))
 
-		// Forward request to backend
-		backend.Proxy.ServeHTTP(wrapped, r)
+		// Forward to backend with the child span's context attached
+		backend.Proxy.ServeHTTP(wrapped, r.WithContext(proxyCtx))
+
 		childSpan.SetAttributes(
 			attribute.String("backend.url", backendURL),
 			attribute.Int("http.status_code", wrapped.statusCode),
@@ -177,6 +180,12 @@ type responseWriter struct {
 func (rw *responseWriter) WriteHeader(code int) {
 	rw.statusCode = code
 	rw.ResponseWriter.WriteHeader(code)
+}
+
+func (rw *responseWriter) Flush() {
+	if flusher, ok := rw.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
 }
 
 func wrapResponseWriter(w http.ResponseWriter) *responseWriter {
