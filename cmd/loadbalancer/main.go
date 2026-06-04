@@ -28,18 +28,23 @@ import (
 	"github.com/vinzmyko/load-balancer/internal/telemetry"
 )
 
-type LoadBalancer struct {
-	backends      []*Backend
-	healthChecker *health.Checker
-	metrics       *Metrics
-	counter       atomic.Uint64
+// healthChecker interface is a field of *health.Checker. Decouples LB from checker.
+type healthChecker interface {
+	IsHealthy(idx int) bool // Needs a method called isHealthy(idx int) returning a bool
 }
 
-func newLoadBalancer(backends []*Backend, healthChecker *health.Checker, metrics *Metrics) *LoadBalancer {
+type LoadBalancer struct {
+	backends []*Backend
+	health   healthChecker
+	metrics  *Metrics
+	counter  atomic.Uint64
+}
+
+func newLoadBalancer(backends []*Backend, health healthChecker, metrics *Metrics) *LoadBalancer {
 	return &LoadBalancer{
-		backends:      backends,
-		healthChecker: healthChecker,
-		metrics:       metrics,
+		backends: backends,
+		health:   health,
+		metrics:  metrics,
 	}
 }
 
@@ -50,7 +55,7 @@ func (lb *LoadBalancer) selectBackend() *Backend {
 	for i := range backendCount {
 		idx := int((next + uint64(i)) % uint64(backendCount))
 
-		if !lb.healthChecker.IsHealthy(idx) {
+		if !lb.health.IsHealthy(idx) {
 			continue
 		}
 
@@ -226,7 +231,7 @@ func run(ctx context.Context) error {
 	metrics := newMetrics()
 
 	backends := make([]*Backend, len(cfg.Backends))
-	healthChecker := health.NewChecker(len(cfg.Backends))
+	hc := health.NewChecker(len(cfg.Backends))
 
 	for i, backend := range cfg.Backends {
 		cb := circuitbreaker.New(backend.URL, 3, 30*time.Second, func(state circuitbreaker.CircuitState) {
@@ -237,10 +242,10 @@ func run(ctx context.Context) error {
 			return fmt.Errorf("creating backend %d: %w", i, err)
 		}
 		backends[i] = b
-		healthChecker.StartChecking(i, backend.URL, metrics.backendHealthy)
+		hc.StartChecking(i, backend.URL, metrics.backendHealthy)
 	}
 
-	lb := newLoadBalancer(backends, healthChecker, metrics)
+	lb := newLoadBalancer(backends, hc, metrics)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler)
@@ -281,7 +286,7 @@ func run(ctx context.Context) error {
 		<-gCtx.Done()
 		slog.Info("Shutting down gracefully")
 
-		healthChecker.Stop()
+		hc.Stop()
 
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()

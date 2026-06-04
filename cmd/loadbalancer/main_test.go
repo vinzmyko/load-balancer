@@ -9,8 +9,18 @@ import (
 	"time"
 
 	"github.com/vinzmyko/load-balancer/internal/circuitbreaker"
-	"github.com/vinzmyko/load-balancer/internal/health"
 )
+
+type fakeHealth struct {
+	isHealthy func(idx int) bool // function field, holds a func value as a field
+}
+
+func (f *fakeHealth) IsHealthy(idx int) bool {
+	if f.isHealthy == nil {
+		return true // default to all healthy
+	}
+	return f.isHealthy(idx)
+}
 
 // newTestBackend builds a backend for tests, fails if constructor errors
 func newTestBackend(t *testing.T, url string, cb *circuitbreaker.CircuitBreaker) *Backend {
@@ -47,7 +57,7 @@ func TestRoundRobinDistribution(t *testing.T) {
 		lbBackends[i] = newTestBackend(t, backends[i].URL, cb)
 	}
 
-	hc := health.NewChecker(3)
+	hc := &fakeHealth{}
 	lb := newLoadBalancer(lbBackends, hc, nil)
 
 	numRequests := 300
@@ -97,8 +107,8 @@ func TestHealthCheckFailover(t *testing.T) {
 		lbBackends[i] = newTestBackend(t, backends[i].URL, cb)
 	}
 
-	hc := health.NewChecker(3)
-	hc.SetHealthy(1, false)
+	// Healthy for all backends except idx == 1
+	hc := &fakeHealth{isHealthy: func(idx int) bool { return idx != 1 }}
 	lb := newLoadBalancer(lbBackends, hc, nil)
 
 	for i := range 3 {
@@ -157,7 +167,7 @@ func TestCircuitBreakerOpens(t *testing.T) {
 	lbBackends[0] = newTestBackend(t, goodBackend.URL, circuitbreaker.New(goodBackend.URL, 3, 10*time.Second, nil))
 	lbBackends[1] = newTestBackend(t, badBackend.URL, circuitbreaker.New(badBackend.URL, 3, 10*time.Second, nil))
 
-	hc := health.NewChecker(2)
+	hc := &fakeHealth{}
 	lb := newLoadBalancer(lbBackends, hc, nil)
 
 	// Make requests - bad backend will fail and circuit will open
