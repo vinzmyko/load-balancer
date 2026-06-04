@@ -193,21 +193,28 @@ func healthHandler(w http.ResponseWriter, _ *http.Request) {
 }
 
 func main() {
-	shutdown := telemetry.InitTracer(context.Background())
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	if err := run(ctx); err != nil {
+		slog.Error("load balancer exited with error", "error", err)
+		os.Exit(1)
+	}
+}
+
+func run(ctx context.Context) error {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+
+	shutdown := telemetry.InitTracer(ctx)
 
 	cfg, err := config.Load("config.yaml")
 	if err != nil {
-		slog.Error("Failed to load config",
-			"error", err)
-		os.Exit(1)
+		return fmt.Errorf("loading config: %w", err)
 	}
 
 	metrics := newMetrics()
 
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
-
 	backends := make([]*Backend, len(cfg.Backends))
-
 	healthChecker := health.NewChecker(len(cfg.Backends))
 
 	for i, backend := range cfg.Backends {
@@ -230,54 +237,39 @@ func main() {
 	metricsMux := http.NewServeMux()
 	metricsMux.Handle("/metrics", promhttp.Handler())
 
-	// Start metrics server in background
 	go func() {
 		metricsAddr := ":9091"
-		slog.Info("Starting metrics",
-			"server", metricsAddr)
+		slog.Info("Starting metrics", "server", metricsAddr)
 		if err := http.ListenAndServe(metricsAddr, metricsMux); err != nil {
-			slog.Error("Metric server failed",
-				"server", metricsAddr,
-				"error", err)
+			slog.Error("Metric server failed", "server", metricsAddr, "error", err)
 		}
 	}()
 
-	// Start main server in background
 	go func() {
-		addr := fmt.Sprintf(":%d", cfg.Server.Port)
-		slog.Info("Starting load balancer",
-			"address", addr)
+		slog.Info("Starting load balancer", "address", server.Addr)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("Server failed",
-				"error", err)
+			slog.Error("Server failed", "error", err)
 		}
 	}()
 
-	// Setup signal handling
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT)
-
-	// Wait for shutdown signal
-	sig := <-sigChan
-	slog.Info("Shutting down gracefully",
-		"signal", sig)
+	<-ctx.Done()
+	slog.Info("Shutting down gracefully")
 
 	healthChecker.Stop()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if err := server.Shutdown(ctx); err != nil {
-		slog.Error("Server shutdown error",
-			"error", err)
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		slog.Error("Server shutdown error", "error", err)
 	}
 
-	if err := shutdown(ctx); err != nil {
-		slog.Error("Tracer shutdown error",
-			"error", err)
+	if err := shutdown(shutdownCtx); err != nil {
+		slog.Error("Tracer shutdown error", "error", err)
 	}
 
 	slog.Info("Shutdown complete")
+	return nil
 }
 
 func createProxy(backendURL string, circuitBreaker *circuitbreaker.CircuitBreaker) *Backend {
