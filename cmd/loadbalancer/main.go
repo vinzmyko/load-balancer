@@ -48,6 +48,9 @@ func newLoadBalancer(backends []*Backend, health healthChecker, metrics *Metrics
 	}
 }
 
+// TODO: weighted round-robin. This ignores each backend's configured
+// Weight and distributes evenly. Implement weighted selection here, ideally
+// behind a Balancer interface so the strategy is swappable.
 func (lb *LoadBalancer) selectBackend() *Backend {
 	next := lb.counter.Add(1)
 	backendCount := len(lb.backends)
