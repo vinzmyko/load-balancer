@@ -9,5 +9,5 @@ FROM alpine:latest
 WORKDIR /app
 COPY --from=builder /app/loadbalancer .
 COPY config.yaml .
-EXPOSE 8080 9090
+EXPOSE 8080 9091
 CMD ["./loadbalancer"]

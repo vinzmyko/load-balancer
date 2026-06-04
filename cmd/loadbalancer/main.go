@@ -153,7 +153,7 @@ func newMetrics() *Metrics {
 				Name: "loadbalancer_backend_healthy",
 				Help: "Backend health status (1 = healthy, 0 = unhealthy)",
 			},
-			[]string{"backends"},
+			[]string{"backend"},
 		),
 		circuitBreakerState: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
