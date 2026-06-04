@@ -187,7 +187,7 @@
                       },
                       "spec": {
                         "editorMode": "code",
-                        "expr": "rate(loadbalancer_requests_total{status_code=~\"5..\"}[1m])",
+                        "expr": "sum(rate(loadbalancer_requests_total{status_code=~\"5..\"}[1m])) / sum(rate(loadbalancer_requests_total[1m]))",
                         "instant": false,
                         "legendFormat": "__auto",
                         "range": true

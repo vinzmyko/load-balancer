@@ -88,9 +88,6 @@ func (lb *LoadBalancer) routeHandler() http.HandlerFunc {
 		backend := lb.selectBackend()
 		backendURL := backend.URL
 
-		// Increment backend request counter
-		lb.metrics.requestsTotal.WithLabelValues(backendURL).Inc()
-
 		proxyCtx, childSpan := tracer.Start(ctx, "proxy-to-backend")
 
 		// Inject the child span's context onto request headers before proxy forwards to backend
@@ -121,6 +118,7 @@ func (lb *LoadBalancer) routeHandler() http.HandlerFunc {
 
 		duration := time.Since(start).Seconds()
 		statusCode := fmt.Sprintf("%d", wrapped.statusCode)
+		lb.metrics.requestsTotal.WithLabelValues(backendURL, statusCode).Inc()
 		lb.metrics.requestDuration.WithLabelValues(backendURL, statusCode).Observe(duration) // Add measurement to histogram
 	}
 }
@@ -140,7 +138,7 @@ func newMetrics() *Metrics {
 				Name: "loadbalancer_requests_total",
 				Help: "Total number of requests forwarded to each backend",
 			},
-			[]string{"backend"},
+			[]string{"backend", "status_code"},
 		),
 		requestDuration: prometheus.NewHistogramVec(
 			prometheus.HistogramOpts{
