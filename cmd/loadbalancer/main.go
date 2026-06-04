@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -19,6 +20,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/vinzmyko/load-balancer/internal/circuitbreaker"
 	"github.com/vinzmyko/load-balancer/internal/config"
@@ -251,36 +253,53 @@ func run(ctx context.Context) error {
 
 	metricsMux := http.NewServeMux()
 	metricsMux.Handle("/metrics", promhttp.Handler())
-
-	go func() {
-		metricsAddr := ":9091"
-		slog.Info("Starting metrics", "server", metricsAddr)
-		if err := http.ListenAndServe(metricsAddr, metricsMux); err != nil {
-			slog.Error("Metric server failed", "server", metricsAddr, "error", err)
-		}
-	}()
-
-	go func() {
-		slog.Info("Starting load balancer", "address", server.Addr)
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("Server failed", "error", err)
-		}
-	}()
-
-	<-ctx.Done()
-	slog.Info("Shutting down gracefully")
-
-	healthChecker.Stop()
-
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	if err := server.Shutdown(shutdownCtx); err != nil {
-		slog.Error("Server shutdown error", "error", err)
+	metricsServer := &http.Server{
+		Addr:    ":9091",
+		Handler: metricsMux,
 	}
 
-	if err := shutdown(shutdownCtx); err != nil {
-		slog.Error("Tracer shutdown error", "error", err)
+	g, gCtx := errgroup.WithContext(ctx)
+
+	g.Go(func() error {
+		slog.Info("Starting load balancer", "address", server.Addr)
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return fmt.Errorf("load balancer server: %w", err)
+		}
+		return nil
+	})
+
+	g.Go(func() error {
+		slog.Info("Starting metrics server", "address", metricsServer.Addr)
+		if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return fmt.Errorf("metrics server: %w", err)
+		}
+		return nil
+	})
+
+	// Wakes when a signal arrives or a server above fails, then drains both servers and the tracer.
+	g.Go(func() error {
+		<-gCtx.Done()
+		slog.Info("Shutting down gracefully")
+
+		healthChecker.Stop()
+
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			slog.Error("Server shutdown error", "error", err)
+		}
+		if err := metricsServer.Shutdown(shutdownCtx); err != nil {
+			slog.Error("Metrics server shutdown error", "error", err)
+		}
+		if err := shutdown(shutdownCtx); err != nil {
+			slog.Error("Tracer shutdown error", "error", err)
+		}
+		return nil
+	})
+
+	if err := g.Wait(); err != nil {
+		return fmt.Errorf("server group: %w", err)
 	}
 
 	slog.Info("Shutdown complete")
