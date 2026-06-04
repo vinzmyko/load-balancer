@@ -221,17 +221,23 @@ func run(ctx context.Context) error {
 		cb := circuitbreaker.New(backend.URL, 3, 30*time.Second, func(state circuitbreaker.CircuitState) {
 			metrics.circuitBreakerState.WithLabelValues(backend.URL).Set(float64(state))
 		})
-		backends[i] = createProxy(backend.URL, cb)
+		b, err := createBackend(backend.URL, cb)
+		if err != nil {
+			return fmt.Errorf("creating backend %d: %w", i, err)
+		}
+		backends[i] = b
 		healthChecker.StartChecking(i, backend.URL, metrics.backendHealthy)
 	}
 
 	lb := newLoadBalancer(backends, healthChecker, metrics)
 
-	http.HandleFunc("/health", healthHandler)
-	http.HandleFunc("/", lb.routeHandler())
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", healthHandler)
+	mux.HandleFunc("/", lb.routeHandler())
 
 	server := &http.Server{
-		Addr: fmt.Sprintf(":%d", cfg.Server.Port),
+		Addr:    fmt.Sprintf(":%d", cfg.Server.Port),
+		Handler: mux,
 	}
 
 	metricsMux := http.NewServeMux()
@@ -272,14 +278,14 @@ func run(ctx context.Context) error {
 	return nil
 }
 
-func createProxy(backendURL string, circuitBreaker *circuitbreaker.CircuitBreaker) *Backend {
+func createBackend(backendURL string, circuitBreaker *circuitbreaker.CircuitBreaker) (*Backend, error) {
 	target, err := url.Parse(backendURL)
 	if err != nil {
 		slog.Error("Backend server parse error",
 			"backend_url", backendURL,
 			"error", err,
 		)
-		os.Exit(1)
+		return nil, fmt.Errorf("parsing backend url %q: %w", backendURL, err)
 	}
 	proxy := httputil.NewSingleHostReverseProxy(target)
 
@@ -309,5 +315,5 @@ func createProxy(backendURL string, circuitBreaker *circuitbreaker.CircuitBreake
 		URL:            backendURL,
 		Proxy:          proxy,
 		CircuitBreaker: circuitBreaker,
-	}
+	}, nil
 }

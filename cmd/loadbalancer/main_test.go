@@ -12,6 +12,16 @@ import (
 	"github.com/vinzmyko/load-balancer/internal/health"
 )
 
+// newTestBackend builds a backend for tests, fails if constructor errors
+func newTestBackend(t *testing.T, url string, cb *circuitbreaker.CircuitBreaker) *Backend {
+	t.Helper()
+	b, err := createBackend(url, cb)
+	if err != nil {
+		t.Fatalf("createBackend(%q): %v", url, err)
+	}
+	return b
+}
+
 func TestRoundRobinDistribution(t *testing.T) {
 	// Create counters for each backend
 	var counts [3]atomic.Uint64
@@ -34,7 +44,7 @@ func TestRoundRobinDistribution(t *testing.T) {
 	lbBackends := make([]*Backend, 3)
 	for i := range 3 {
 		cb := circuitbreaker.New(fmt.Sprintf(":%d", i), 5, 10*time.Second, nil)
-		lbBackends[i] = createProxy(backends[i].URL, cb)
+		lbBackends[i] = newTestBackend(t, backends[i].URL, cb)
 	}
 
 	hc := health.NewChecker(3)
@@ -84,7 +94,7 @@ func TestHealthCheckFailover(t *testing.T) {
 	lbBackends := make([]*Backend, 3)
 	for i := range 3 {
 		cb := circuitbreaker.New(fmt.Sprintf(":%d", i), 5, 10*time.Second, nil)
-		lbBackends[i] = createProxy(backends[i].URL, cb)
+		lbBackends[i] = newTestBackend(t, backends[i].URL, cb)
 	}
 
 	hc := health.NewChecker(3)
@@ -144,8 +154,8 @@ func TestCircuitBreakerOpens(t *testing.T) {
 	defer badBackend.Close()
 
 	lbBackends := make([]*Backend, 2)
-	lbBackends[0] = createProxy(goodBackend.URL, circuitbreaker.New(goodBackend.URL, 3, 10*time.Second, nil))
-	lbBackends[1] = createProxy(badBackend.URL, circuitbreaker.New(badBackend.URL, 3, 10*time.Second, nil))
+	lbBackends[0] = newTestBackend(t, goodBackend.URL, circuitbreaker.New(goodBackend.URL, 3, 10*time.Second, nil))
+	lbBackends[1] = newTestBackend(t, badBackend.URL, circuitbreaker.New(badBackend.URL, 3, 10*time.Second, nil))
 
 	hc := health.NewChecker(2)
 	lb := newLoadBalancer(lbBackends, hc, nil)
