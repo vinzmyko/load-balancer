@@ -1,4 +1,4 @@
-package main
+package balancer
 
 import (
 	"fmt"
@@ -25,7 +25,7 @@ func (f *fakeHealth) IsHealthy(idx int) bool {
 // newTestBackend builds a backend for tests, fails if constructor errors
 func newTestBackend(t *testing.T, url string, cb *circuitbreaker.CircuitBreaker) *Backend {
 	t.Helper()
-	b, err := createBackend(url, cb)
+	b, err := NewBackend(url, cb)
 	if err != nil {
 		t.Fatalf("createBackend(%q): %v", url, err)
 	}
@@ -58,7 +58,7 @@ func TestRoundRobinDistribution(t *testing.T) {
 	}
 
 	hc := &fakeHealth{}
-	lb := newLoadBalancer(lbBackends, hc, nil)
+	lb := New(lbBackends, hc, nil)
 
 	numRequests := 300
 	for range numRequests {
@@ -109,7 +109,7 @@ func TestHealthCheckFailover(t *testing.T) {
 
 	// Healthy for all backends except idx == 1
 	hc := &fakeHealth{isHealthy: func(idx int) bool { return idx != 1 }}
-	lb := newLoadBalancer(lbBackends, hc, nil)
+	lb := New(lbBackends, hc, nil)
 
 	for i := range 3 {
 		counts[i].Store(0)
@@ -168,7 +168,7 @@ func TestCircuitBreakerOpens(t *testing.T) {
 	lbBackends[1] = newTestBackend(t, badBackend.URL, circuitbreaker.New(badBackend.URL, 3, 10*time.Second, nil))
 
 	hc := &fakeHealth{}
-	lb := newLoadBalancer(lbBackends, hc, nil)
+	lb := New(lbBackends, hc, nil)
 
 	// Make requests - bad backend will fail and circuit will open
 	for range 20 {
