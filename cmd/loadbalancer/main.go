@@ -6,202 +6,20 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"net/http/httputil"
-	"net/url"
 	"os"
 	"os/signal"
-	"sync/atomic"
 	"syscall"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/propagation"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/vinzmyko/load-balancer/internal/balancer"
 	"github.com/vinzmyko/load-balancer/internal/circuitbreaker"
 	"github.com/vinzmyko/load-balancer/internal/config"
 	"github.com/vinzmyko/load-balancer/internal/health"
 	"github.com/vinzmyko/load-balancer/internal/telemetry"
 )
-
-// healthChecker interface is a field of *health.Checker. Decouples LB from checker.
-type healthChecker interface {
-	IsHealthy(idx int) bool // Needs a method called isHealthy(idx int) returning a bool
-}
-
-type LoadBalancer struct {
-	backends []*Backend
-	health   healthChecker
-	metrics  *Metrics
-	counter  atomic.Uint64
-}
-
-func newLoadBalancer(backends []*Backend, health healthChecker, metrics *Metrics) *LoadBalancer {
-	return &LoadBalancer{
-		backends: backends,
-		health:   health,
-		metrics:  metrics,
-	}
-}
-
-// TODO: weighted round-robin. This ignores each backend's configured
-// Weight and distributes evenly. Implement weighted selection here, ideally
-// behind a Balancer interface so the strategy is swappable.
-func (lb *LoadBalancer) selectBackend() *Backend {
-	next := lb.counter.Add(1)
-	backendCount := len(lb.backends)
-
-	for i := range backendCount {
-		idx := int((next + uint64(i)) % uint64(backendCount))
-
-		if !lb.health.IsHealthy(idx) {
-			continue
-		}
-
-		if !lb.backends[idx].CircuitBreaker.CanAttempt() {
-			continue
-		}
-
-		return lb.backends[idx]
-	}
-
-	// Nothing healthy to pick. Return a backend anyway so we don't crash on nil.
-	// The request will likely fail, but the circuit breaker records that and the
-	// client gets a 502.
-	return lb.backends[int(next%uint64(len(lb.backends)))]
-}
-
-// Forwards requests to backends
-func (lb *LoadBalancer) routeHandler() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		tracer := otel.Tracer("load-balancer")
-		ctx, span := tracer.Start(r.Context(), "handle-request")
-		defer span.End()
-		start := time.Now()
-
-		wrapped := wrapResponseWriter(w)
-
-		backend := lb.selectBackend()
-		backendURL := backend.URL
-
-		proxyCtx, childSpan := tracer.Start(ctx, "proxy-to-backend")
-
-		// Inject the child span's context onto request headers before proxy forwards to backend
-		otel.GetTextMapPropagator().Inject(proxyCtx, propagation.HeaderCarrier(r.Header))
-
-		// Forward to backend with the child span's context attached
-		backend.Proxy.ServeHTTP(wrapped, r.WithContext(proxyCtx))
-
-		childSpan.SetAttributes(
-			attribute.String("backend.url", backendURL),
-			attribute.Int("http.status_code", wrapped.statusCode),
-		)
-		childSpan.End()
-
-		// Set the span status
-		if wrapped.statusCode >= 500 {
-			span.SetStatus(codes.Error, fmt.Sprintf("server error: %d", wrapped.statusCode))
-		} else {
-			span.SetStatus(codes.Ok, "")
-		}
-
-		span.SetAttributes(
-			attribute.String("http.method", r.Method),
-			attribute.String("http.path", r.URL.Path),
-			attribute.String("backend.url", backendURL),
-			attribute.Int("http.status_code", wrapped.statusCode),
-		)
-
-		duration := time.Since(start).Seconds()
-		statusCode := fmt.Sprintf("%d", wrapped.statusCode)
-		lb.metrics.requestsTotal.WithLabelValues(backendURL, statusCode).Inc()
-		lb.metrics.requestDuration.WithLabelValues(backendURL, statusCode).Observe(duration) // Add measurement to histogram
-	}
-}
-
-// Metrics contain the Prometheus metrics
-type Metrics struct {
-	requestsTotal       *prometheus.CounterVec   // Counter that only goes up
-	backendHealthy      *prometheus.GaugeVec     // Gauge that can only go up and down
-	requestDuration     *prometheus.HistogramVec // A bucket with lots of values
-	circuitBreakerState *prometheus.GaugeVec
-}
-
-func newMetrics() *Metrics {
-	m := &Metrics{
-		requestsTotal: prometheus.NewCounterVec(
-			prometheus.CounterOpts{
-				Name: "loadbalancer_requests_total",
-				Help: "Total number of requests forwarded to each backend",
-			},
-			[]string{"backend", "status_code"},
-		),
-		requestDuration: prometheus.NewHistogramVec(
-			prometheus.HistogramOpts{
-				Name:    "loadbalancer_request_duration_seconds",
-				Help:    "Request duration in seconds",
-				Buckets: prometheus.DefBuckets,
-			},
-			[]string{"backend", "status_code"},
-		),
-		backendHealthy: prometheus.NewGaugeVec(
-			prometheus.GaugeOpts{
-				Name: "loadbalancer_backend_healthy",
-				Help: "Backend health status (1 = healthy, 0 = unhealthy)",
-			},
-			[]string{"backend"},
-		),
-		circuitBreakerState: prometheus.NewGaugeVec(
-			prometheus.GaugeOpts{
-				Name: "loadbalancer_circuit_breaker_state",
-				Help: "Circuit breaker state (0 = closed, 1 = open, 2 = half open)",
-			},
-			[]string{"backend"},
-		),
-	}
-
-	prometheus.MustRegister(
-		m.requestsTotal,
-		m.requestDuration,
-		m.backendHealthy,
-		m.circuitBreakerState,
-	)
-
-	return m
-}
-
-type Backend struct {
-	URL            string
-	Proxy          *httputil.ReverseProxy
-	CircuitBreaker *circuitbreaker.CircuitBreaker
-}
-
-type responseWriter struct {
-	http.ResponseWriter
-	statusCode int
-}
-
-func (rw *responseWriter) WriteHeader(code int) {
-	rw.statusCode = code
-	rw.ResponseWriter.WriteHeader(code)
-}
-
-func (rw *responseWriter) Flush() {
-	if flusher, ok := rw.ResponseWriter.(http.Flusher); ok {
-		flusher.Flush()
-	}
-}
-
-func wrapResponseWriter(w http.ResponseWriter) *responseWriter {
-	return &responseWriter{
-		ResponseWriter: w,
-		statusCode:     200,
-	}
-}
 
 // Health checking function handler
 func healthHandler(w http.ResponseWriter, _ *http.Request) {
@@ -229,28 +47,28 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("loading config: %w", err)
 	}
 
-	metrics := newMetrics()
+	metrics := balancer.NewMetrics()
 
-	backends := make([]*Backend, len(cfg.Backends))
+	backends := make([]*balancer.Backend, len(cfg.Backends))
 	hc := health.NewChecker(len(cfg.Backends))
 
 	for i, backend := range cfg.Backends {
 		cb := circuitbreaker.New(backend.URL, 3, 30*time.Second, func(state circuitbreaker.CircuitState) {
-			metrics.circuitBreakerState.WithLabelValues(backend.URL).Set(float64(state))
+			metrics.CircuitBreakerState().WithLabelValues(backend.URL).Set(float64(state))
 		})
-		b, err := createBackend(backend.URL, cb)
+		b, err := balancer.NewBackend(backend.URL, cb)
 		if err != nil {
 			return fmt.Errorf("creating backend %d: %w", i, err)
 		}
 		backends[i] = b
-		hc.StartChecking(i, backend.URL, metrics.backendHealthy)
+		hc.StartChecking(i, backend.URL, metrics.BackendHealthy())
 	}
 
-	lb := newLoadBalancer(backends, hc, metrics)
+	lb := balancer.New(backends, hc, metrics)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler)
-	mux.HandleFunc("/", lb.routeHandler())
+	mux.HandleFunc("/", lb.RouteHandler())
 
 	server := &http.Server{
 		Addr:    fmt.Sprintf(":%d", cfg.Server.Port),
@@ -310,44 +128,4 @@ func run(ctx context.Context) error {
 
 	slog.Info("Shutdown complete")
 	return nil
-}
-
-func createBackend(backendURL string, circuitBreaker *circuitbreaker.CircuitBreaker) (*Backend, error) {
-	target, err := url.Parse(backendURL)
-	if err != nil {
-		slog.Error("Backend server parse error",
-			"backend_url", backendURL,
-			"error", err,
-		)
-		return nil, fmt.Errorf("parsing backend url %q: %w", backendURL, err)
-	}
-	proxy := httputil.NewSingleHostReverseProxy(target)
-
-	// Called on success
-	proxy.ModifyResponse = func(resp *http.Response) error {
-		// Only record success for 2xx and 3xx status codes
-		if resp.StatusCode >= 200 && resp.StatusCode < 400 {
-			circuitBreaker.RecordSuccess()
-		} else {
-			// 4xx and 5xx are failures
-			circuitBreaker.RecordFailure()
-		}
-		return nil
-	}
-
-	// Called on errors
-	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-		slog.Error("Proxy error",
-			"backend_url", backendURL,
-			"error", err,
-		)
-		circuitBreaker.RecordFailure()
-		http.Error(w, "Bad Gateway", http.StatusBadGateway)
-	}
-
-	return &Backend{
-		URL:            backendURL,
-		Proxy:          proxy,
-		CircuitBreaker: circuitBreaker,
-	}, nil
 }
