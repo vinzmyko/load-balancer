@@ -54,7 +54,7 @@ func run(ctx context.Context) error {
 
 	backendConfigs := disc.Backends()
 	backends := make([]*balancer.Backend, len(backendConfigs))
-	hc := health.NewChecker(len(backendConfigs))
+	hc := health.NewChecker(metrics.BackendHealthy())
 
 	for i, backend := range backendConfigs {
 		cb := circuitbreaker.New(backend.URL, 3, 30*time.Second, func(state circuitbreaker.CircuitState) {
@@ -65,7 +65,7 @@ func run(ctx context.Context) error {
 			return fmt.Errorf("creating backend %d: %w", i, err)
 		}
 		backends[i] = b
-		hc.StartChecking(i, backend.URL, metrics.BackendHealthy())
+		hc.StartChecking(backend.URL)
 	}
 
 	lb := balancer.New(backends, hc, metrics)

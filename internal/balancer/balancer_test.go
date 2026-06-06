@@ -12,14 +12,14 @@ import (
 )
 
 type fakeHealth struct {
-	isHealthy func(idx int) bool // function field, holds a func value as a field
+	isHealthy func(backendURL string) bool // function field, holds a func value as a field
 }
 
-func (f *fakeHealth) IsHealthy(idx int) bool {
+func (f *fakeHealth) IsHealthy(backendURL string) bool {
 	if f.isHealthy == nil {
 		return true // default to all healthy
 	}
-	return f.isHealthy(idx)
+	return f.isHealthy(backendURL)
 }
 
 // newTestBackend builds a backend for tests, fails if constructor errors
@@ -108,7 +108,7 @@ func TestHealthCheckFailover(t *testing.T) {
 	}
 
 	// Healthy for all backends except idx == 1
-	hc := &fakeHealth{isHealthy: func(idx int) bool { return idx != 1 }}
+	hc := &fakeHealth{isHealthy: func(backendURL string) bool { return backendURL != lbBackends[1].URL }}
 	lb := New(lbBackends, hc, nil)
 
 	for i := range 3 {

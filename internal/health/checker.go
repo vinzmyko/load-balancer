@@ -10,86 +10,120 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// Checker manages health checking for multiple backends
+// Checker manages health checking for multiple backends, keyed by URL.
 type Checker struct {
-	healthStatus map[int]bool    // All the backend server's health status
-	healthMutex  sync.RWMutex    // Mutex for health related operations
-	stopChans    []chan struct{} // One stop channel per backend
+	healthStatus map[string]bool          // backend URL -> is healthy?
+	stopChans    map[string]chan struct{} // backend URL -> stop signal/goroutine
+	healthMutex  sync.RWMutex             // Mutex guard for both maps
+	gauge        *prometheus.GaugeVec
 }
 
-// NewChecker creates a health checker for the given number of backends
-func NewChecker(backendCount int) *Checker {
-	healthStatus := make(map[int]bool)
-	for i := range backendCount {
-		healthStatus[i] = true
-	}
-
+// NewChecker creates a health checker. Gauge is updated on health transmissions.
+func NewChecker(gauge *prometheus.GaugeVec) *Checker {
 	return &Checker{
-		healthStatus: healthStatus,
+		healthStatus: make(map[string]bool),
+		stopChans:    make(map[string]chan struct{}),
+		gauge:        gauge,
 	}
 }
 
-// StartChecking starts a background health checker for a backend
-func (hc *Checker) StartChecking(idx int, backendURL string, gauge *prometheus.GaugeVec) {
-	stopChan := make(chan struct{})
-	hc.stopChans = append(hc.stopChans, stopChan)
+// StartChecking starts a background health checker for a backend. It is idempotent.
+// Spins up a goroutine that runs in a loop, pinging the backend to see if it's alive.
+func (hc *Checker) StartChecking(backendURL string) {
+	hc.healthMutex.Lock()
+	// Guard clause if health checker goroutine already existing
+	if _, exists := hc.stopChans[backendURL]; exists {
+		hc.healthMutex.Unlock()
+		return
+	}
 
+	// Create and wire up the health checker
+	stopChan := make(chan struct{})
+	hc.stopChans[backendURL] = stopChan
+	hc.healthStatus[backendURL] = true // assume healthy until a probe fails
+	hc.healthMutex.Unlock()
+
+	if hc.gauge != nil {
+		hc.gauge.WithLabelValues(backendURL).Set(1)
+	}
+
+	// Create the health checker goroutine
 	go func() {
+		// Create heartbeat ticker that receives a value every 10 seconds
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
 
 		for {
 			select {
+			// Everytime a heartbeat comes in we check the health and update the value.
 			case <-ticker.C:
 				isHealthy := checkHealth(backendURL)
 
 				hc.healthMutex.Lock()
-				if hc.healthStatus[idx] != isHealthy {
+				if hc.healthStatus[backendURL] != isHealthy { // If value has changed
 					if isHealthy {
-						slog.Info("Backend is now HEALTHY",
-							"index", idx,
-							"backend_url", backendURL)
-						gauge.WithLabelValues(backendURL).Set(1)
+						slog.Info("Backend is now HEALTHY", "backend_url", backendURL)
+						if hc.gauge != nil {
+							hc.gauge.WithLabelValues(backendURL).Set(1)
+						}
 					} else {
-						slog.Warn("Backend is now UNHEALTHY",
-							"index", idx,
-							"backend_url", backendURL)
-						gauge.WithLabelValues(backendURL).Set(0)
+						slog.Warn("Backend is now UNHEALTHY", "backend_url", backendURL)
+						if hc.gauge != nil {
+							hc.gauge.WithLabelValues(backendURL).Set(0)
+						}
 					}
-					hc.healthStatus[idx] = isHealthy
+					hc.healthStatus[backendURL] = isHealthy
 				}
 				hc.healthMutex.Unlock()
 			case <-stopChan:
-				slog.Info("Stopping health checker",
-					"backend_url", backendURL)
+				slog.Info("Stopping health checker", "backend_url", backendURL)
 				return
 			}
 		}
 	}()
 }
 
-// Stop sends signal to goroutine to stop
-func (hc *Checker) Stop() {
-	for _, stopChan := range hc.stopChans {
+// StopChecking stops health checking a backend and removes its state and gauge.
+func (hc *Checker) StopChecking(backendURL string) {
+	hc.healthMutex.Lock()
+	defer hc.healthMutex.Unlock()
+
+	if stopChan, ok := hc.stopChans[backendURL]; ok {
 		close(stopChan)
+		delete(hc.stopChans, backendURL)
+		delete(hc.healthStatus, backendURL)
+		if hc.gauge != nil {
+			hc.gauge.DeleteLabelValues(backendURL)
+		}
 	}
 }
 
-// IsHealthy returns whether a backend is currently healthy
-func (hc *Checker) IsHealthy(idx int) bool {
-	hc.healthMutex.RLock()
-	defer hc.healthMutex.RUnlock()
-	return hc.healthStatus[idx]
-}
-
-// SetHealthy manually sets health status (for testing)
-func (hc *Checker) SetHealthy(idx int, healthy bool) {
+// Stop signals all health checkers to stop.
+func (hc *Checker) Stop() {
 	hc.healthMutex.Lock()
 	defer hc.healthMutex.Unlock()
-	hc.healthStatus[idx] = healthy
+
+	for url, stopChan := range hc.stopChans {
+		close(stopChan) // Sends the to the case of <-stopChan
+		delete(hc.stopChans, url)
+	}
 }
 
-// Performs a single health check for a backend
+// IsHealthy returns whether a backend is currently healthy.
+func (hc *Checker) IsHealthy(backendURL string) bool {
+	hc.healthMutex.RLock()
+	defer hc.healthMutex.RUnlock()
+	return hc.healthStatus[backendURL]
+}
+
+// SetHealthy manually sets health status (for testing).
+func (hc *Checker) SetHealthy(backendURL string, healthy bool) {
+	hc.healthMutex.Lock()
+	defer hc.healthMutex.Unlock()
+	hc.healthStatus[backendURL] = healthy
+}
+
+// checkHealth performs a single health check for a backend.
 func checkHealth(backendURL string) bool {
 	client := &http.Client{Timeout: 2 * time.Second}
 

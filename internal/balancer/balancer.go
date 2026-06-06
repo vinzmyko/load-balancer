@@ -17,7 +17,7 @@ import (
 
 // healthChecker interface is a field of *health.Checker. Decouples LB from checker.
 type healthChecker interface {
-	IsHealthy(idx int) bool // Needs a method called isHealthy(idx int) returning a bool
+	IsHealthy(backendURL string) bool // Needs a method called isHealthy(backendURL) returning a bool
 }
 
 type LoadBalancer struct {
@@ -95,16 +95,17 @@ func (lb *LoadBalancer) selectBackend() *Backend {
 
 	for i := range backendCount {
 		idx := int((next + uint64(i)) % uint64(backendCount))
+		b := lb.backends[idx]
 
-		if !lb.health.IsHealthy(idx) {
+		if !lb.health.IsHealthy(b.URL) {
 			continue
 		}
 
-		if !lb.backends[idx].CircuitBreaker.CanAttempt() {
+		if !b.CircuitBreaker.CanAttempt() {
 			continue
 		}
 
-		return lb.backends[idx]
+		return b
 	}
 
 	// Nothing healthy to pick. Return a backend anyway so we don't crash on nil.
