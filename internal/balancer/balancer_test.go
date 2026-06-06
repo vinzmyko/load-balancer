@@ -22,6 +22,9 @@ func (f *fakeHealth) IsHealthy(backendURL string) bool {
 	return f.isHealthy(backendURL)
 }
 
+func (f *fakeHealth) StartChecking(url string) {}
+func (f *fakeHealth) StopChecking(url string)  {}
+
 // newTestBackend builds a backend for tests, fails if constructor errors
 func newTestBackend(t *testing.T, url string, cb *circuitbreaker.CircuitBreaker) *Backend {
 	t.Helper()
@@ -58,7 +61,8 @@ func TestRoundRobinDistribution(t *testing.T) {
 	}
 
 	hc := &fakeHealth{}
-	lb := New(lbBackends, hc, nil)
+	lb := New(hc, nil)
+	lb.backends.Store(&lbBackends)
 
 	numRequests := 300
 	for range numRequests {
@@ -109,7 +113,8 @@ func TestHealthCheckFailover(t *testing.T) {
 
 	// Healthy for all backends except idx == 1
 	hc := &fakeHealth{isHealthy: func(backendURL string) bool { return backendURL != lbBackends[1].URL }}
-	lb := New(lbBackends, hc, nil)
+	lb := New(hc, nil)
+	lb.backends.Store(&lbBackends)
 
 	for i := range 3 {
 		counts[i].Store(0)
@@ -168,7 +173,8 @@ func TestCircuitBreakerOpens(t *testing.T) {
 	lbBackends[1] = newTestBackend(t, badBackend.URL, circuitbreaker.New(badBackend.URL, 3, 10*time.Second, nil))
 
 	hc := &fakeHealth{}
-	lb := New(lbBackends, hc, nil)
+	lb := New(hc, nil)
+	lb.backends.Store(&lbBackends)
 
 	// Make requests - bad backend will fail and circuit will open
 	for range 20 {

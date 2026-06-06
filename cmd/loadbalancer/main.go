@@ -15,7 +15,6 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/vinzmyko/load-balancer/internal/balancer"
-	"github.com/vinzmyko/load-balancer/internal/circuitbreaker"
 	"github.com/vinzmyko/load-balancer/internal/config"
 	"github.com/vinzmyko/load-balancer/internal/discovery"
 	"github.com/vinzmyko/load-balancer/internal/health"
@@ -52,23 +51,10 @@ func run(ctx context.Context) error {
 
 	metrics := balancer.NewMetrics()
 
-	backendConfigs := disc.Backends()
-	backends := make([]*balancer.Backend, len(backendConfigs))
 	hc := health.NewChecker(metrics.BackendHealthy())
 
-	for i, backend := range backendConfigs {
-		cb := circuitbreaker.New(backend.URL, 3, 30*time.Second, func(state circuitbreaker.CircuitState) {
-			metrics.CircuitBreakerState().WithLabelValues(backend.URL).Set(float64(state))
-		})
-		b, err := balancer.NewBackend(backend.URL, cb)
-		if err != nil {
-			return fmt.Errorf("creating backend %d: %w", i, err)
-		}
-		backends[i] = b
-		hc.StartChecking(backend.URL)
-	}
-
-	lb := balancer.New(backends, hc, metrics)
+	lb := balancer.New(hc, metrics)
+	lb.UpdateBackends(disc.Backends())
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler)
