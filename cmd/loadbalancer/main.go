@@ -17,6 +17,7 @@ import (
 	"github.com/vinzmyko/load-balancer/internal/balancer"
 	"github.com/vinzmyko/load-balancer/internal/circuitbreaker"
 	"github.com/vinzmyko/load-balancer/internal/config"
+	"github.com/vinzmyko/load-balancer/internal/discovery"
 	"github.com/vinzmyko/load-balancer/internal/health"
 	"github.com/vinzmyko/load-balancer/internal/telemetry"
 )
@@ -47,12 +48,15 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("loading config: %w", err)
 	}
 
+	disc := discovery.NewStatic(cfg.Backends)
+
 	metrics := balancer.NewMetrics()
 
-	backends := make([]*balancer.Backend, len(cfg.Backends))
-	hc := health.NewChecker(len(cfg.Backends))
+	backendConfigs := disc.Backends()
+	backends := make([]*balancer.Backend, len(backendConfigs))
+	hc := health.NewChecker(len(backendConfigs))
 
-	for i, backend := range cfg.Backends {
+	for i, backend := range backendConfigs {
 		cb := circuitbreaker.New(backend.URL, 3, 30*time.Second, func(state circuitbreaker.CircuitState) {
 			metrics.CircuitBreakerState().WithLabelValues(backend.URL).Set(float64(state))
 		})
