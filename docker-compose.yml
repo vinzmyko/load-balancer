@@ -4,11 +4,21 @@ services:
     ports:
       - "8080:8080"
       - "9091:9091"
+    environment:
+      - REGISTRY_URL=http://registry:8090
+      - SERVICE_NAME=backend
     depends_on:
       - tempo
+      - registry
       - backend1
       - backend2
       - backend3
+  registry:
+    build:
+      context: .
+      dockerfile: Dockerfile.registry
+    ports:
+      - "8090:8090"
   prometheus:
     image: prom/prometheus:latest
     ports:
@@ -48,6 +58,12 @@ services:
       context: .
       dockerfile: Dockerfile.backend
     command: ["./testbackend", "8081"]
+    environment:
+      - REGISTRY_URL=http://registry:8090
+      - SERVICE_NAME=backend
+      - ADVERTISE_URL=http://backend1:8081
+    depends_on:
+      - registry
     ports:
       - "8081:8081"
   backend2:
@@ -55,6 +71,12 @@ services:
       context: .
       dockerfile: Dockerfile.backend
     command: ["./testbackend", "8082"]
+    environment:
+      - REGISTRY_URL=http://registry:8090
+      - SERVICE_NAME=backend
+      - ADVERTISE_URL=http://backend2:8082
+    depends_on:
+      - registry
     ports:
       - "8082:8082"
   backend3:
@@ -62,5 +84,11 @@ services:
       context: .
       dockerfile: Dockerfile.backend
     command: ["./testbackend", "8083"]
+    environment:
+      - REGISTRY_URL=http://registry:8090
+      - SERVICE_NAME=backend
+      - ADVERTISE_URL=http://backend3:8083
+    depends_on:
+      - registry
     ports:
       - "8083:8083"

@@ -10,16 +10,16 @@ import (
 	"time"
 )
 
-// Registry maps service name -> instance URL -> last heartbeat time.
-type Registry struct {
+// Server maps service name -> instance URL -> last heartbeat time.
+type Server struct {
 	mu       sync.Mutex                      // Prevents concurrent access to services map
 	services map[string]map[string]time.Time // Multiple services, each with multiple instances, with last check in time
 	ttl      time.Duration                   // Time to live without heartbeat before evicted
 }
 
 // New creates a registry.
-func New(ttl time.Duration) *Registry {
-	return &Registry{
+func New(ttl time.Duration) *Server {
+	return &Server{
 		services: make(map[string]map[string]time.Time),
 		ttl:      ttl,
 	}
@@ -32,7 +32,7 @@ type registration struct {
 }
 
 // register creates the instance and updates the last-seen time. Calling this repeatedly is the heartbeat.
-func (r *Registry) register(service, url string) {
+func (r *Server) register(service, url string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -48,7 +48,7 @@ func (r *Registry) register(service, url string) {
 }
 
 // deregister removes the instance from the services map.
-func (r *Registry) deregister(service, url string) {
+func (r *Server) deregister(service, url string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -61,7 +61,7 @@ func (r *Registry) deregister(service, url string) {
 }
 
 // list returns all the URLs for a given service.
-func (r *Registry) list(service string) []string {
+func (r *Server) list(service string) []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -74,7 +74,7 @@ func (r *Registry) list(service string) []string {
 }
 
 // evictExpired removes instances where last heartbeat is older than TTL.
-func (r *Registry) evictExpired() {
+func (r *Server) evictExpired() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -90,7 +90,7 @@ func (r *Registry) evictExpired() {
 }
 
 // StartEviction runs the background goroutine until stop is closed.
-func (r *Registry) StartEviction(interval time.Duration, stop <-chan struct{}) {
+func (r *Server) StartEviction(interval time.Duration, stop <-chan struct{}) {
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
@@ -107,7 +107,7 @@ func (r *Registry) StartEviction(interval time.Duration, stop <-chan struct{}) {
 }
 
 // Handler returns the registry's HTTP routes.
-func (r *Registry) Handler() http.Handler {
+func (r *Server) Handler() http.Handler {
 	// Create HTTP router
 	mux := http.NewServeMux()
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -47,14 +48,23 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("loading config: %w", err)
 	}
 
-	disc := discovery.NewStatic(cfg.Backends)
+	var disc discovery.Discoverer
+	// If env vars set use dynamic backends else use config file.
+	if registryURL := os.Getenv("REGISTRY_URL"); registryURL != "" {
+		service := cmp.Or(os.Getenv("SERVICE_NAME"), "backend")
+		disc = discovery.NewRegistry(registryURL, service)
+		slog.Info("Using registry discovery", "registry_url", registryURL, "service", service)
+	} else {
+		disc = discovery.NewStatic(cfg.Backends)
+		slog.Info("Using static discovery from config.yaml")
+	}
 
 	metrics := balancer.NewMetrics()
 
 	hc := health.NewChecker(metrics.BackendHealthy())
 
 	lb := balancer.New(hc, metrics)
-	lb.UpdateBackends(disc.Backends())
+	lb.UpdateBackends(disc.Backends()) // polls immediately on startup
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler)
@@ -88,6 +98,21 @@ func run(ctx context.Context) error {
 			return fmt.Errorf("metrics server: %w", err)
 		}
 		return nil
+	})
+
+	// Goroutine that keeps the load balancer in sync with the registry.
+	g.Go(func() error {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				lb.UpdateBackends(disc.Backends())
+			case <-gCtx.Done():
+				return nil
+			}
+		}
 	})
 
 	// Wakes when a signal arrives or a server above fails, then drains both servers and the tracer.
